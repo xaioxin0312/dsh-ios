@@ -409,6 +409,93 @@ function cleanAllPatches() {
   }
 }
 
+/* +ios24.3 —— 隔离 profile 里遮蔽运行时的旧版核心包副本。
+ *
+ * 真机症状（+ios24.2 仍复现「工作区/对话加载不出」）:
+ *   dsh: disabling profile plugin row "directory-picker": Plugin
+ *   @deepseek-ai/dsh-host-directory-picker-auto@0.2.1-rc.5 is incompatible
+ *   with dsh 0.2.2-rc.3 ...
+ *   typert gateway: directoryPicker/list: active Service
+ *   "directoryPickerController" is unavailable
+ *
+ * 根因: 用户 dsh plugin add 后，pnpm 以 hoisted 布局把插件依赖的 @deepseek-ai
+ * 核心包也硬链进 profiles/<name>/node_modules。boot 的模块解析「profile
+ * node_modules 优先」，于是 rc.3 的 directory-picker 行加载到 rc.5 旧副本；
+ * 版本守卫判定不兼容后把整行 disabled，directoryPicker 服务永远不注册。
+ * 会话持久化等同理，一旦被旧副本遮蔽，读写路径也会和运行时对不上。
+ *
+ * 修法: 只隔离「运行时安装树里同名的核心包、但版本不同」的副本（移到
+ * $DSH_HOME/.dsh-compat-quarantine/，带原版本号与时间戳，不删除）；用户
+ * 自己装的第三方插件（运行时树里没有的包）一律不碰。每次启动幂等执行。 */
+function readPkgIdentity(dir) {
+  try {
+    const d = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+    return {
+      name: typeof d.name === 'string' ? d.name : '',
+      version: typeof d.version === 'string' ? d.version : '',
+    };
+  } catch { return null; }
+}
+
+function runtimeCoreVersions() {
+  const versions = new Map();
+  const scope = path.join(PKG, 'node_modules', '@deepseek-ai');
+  let ents = [];
+  try { ents = fs.readdirSync(scope, { withFileTypes: true }); } catch { return versions; }
+  for (const e of ents) {
+    if (!e.isDirectory() && !e.isSymbolicLink()) continue;
+    const pkg = readPkgIdentity(path.join(scope, e.name));
+    if (pkg && pkg.version && pkg.name === `@deepseek-ai/${e.name}`) versions.set(pkg.name, pkg.version);
+  }
+  return versions;
+}
+
+function quarantineShadowedCore() {
+  const runtime = runtimeCoreVersions();
+  if (runtime.size === 0) return;
+  const roots = [];
+  const pdir = path.join(HOME, 'profiles');
+  let pents = [];
+  try { pents = fs.readdirSync(pdir, { withFileTypes: true }); } catch {}
+  for (const e of pents) {
+    if (e.isDirectory() || e.isSymbolicLink()) {
+      roots.push({ label: `profiles/${e.name}`, nm: path.join(pdir, e.name, 'node_modules') });
+    }
+  }
+  // Node 从 profile 目录向上查找时也会命中 $DSH_HOME/node_modules，一并检查。
+  roots.push({ label: 'home', nm: path.join(HOME, 'node_modules') });
+
+  let moved = 0;
+  for (const root of roots) {
+    const scope = path.join(root.nm, '@deepseek-ai');
+    let ents = [];
+    try { ents = fs.readdirSync(scope, { withFileTypes: true }); } catch { continue; }
+    for (const e of ents) {
+      const name = `@deepseek-ai/${e.name}`;
+      const want = runtime.get(name);
+      if (want === void 0) continue;              // 用户自己的插件，绝不碰
+      const src = path.join(scope, e.name);
+      const pkg = readPkgIdentity(src);
+      if (!pkg || !pkg.version || pkg.version === want) continue;
+      const stamp = Date.now() + '-' + Math.random().toString(36).slice(2, 6);
+      const dest = path.join(HOME, '.dsh-compat-quarantine',
+        root.label.replace(/[\\/]/g, '_'), pkg.name, `${pkg.version}-${stamp}`);
+      try {
+        fs.mkdirSync(path.dirname(dest), { recursive: true });
+        fs.renameSync(src, dest);
+        log(`[fixed] ${root.label}: 隔离核心包 ${name}@${pkg.version}（运行时 ${want}）；`
+          + '备份在 $DSH_HOME/.dsh-compat-quarantine');
+        moved++;
+      } catch (err) {
+        log(`[warn] ${root.label}: 无法隔离 ${name}@${pkg.version} (${err.code || err.message})；`
+          + '请手动删除该副本后重启 dsh');
+        warned++;
+      }
+    }
+  }
+  if (moved > 0) fixed++;
+}
+
 /* 只删「我们建的、指向包内」的 node_modules 软链；真实目录一律不动 */
 function cleanSymlinks() {
   const nm = path.join(HOME, 'node_modules');
@@ -449,6 +536,9 @@ function main() {
   //   必须在 boot 之前跑；dsh wrapper 和 dsh-doctor 都会在启动前调用本脚本。
   cleanAllPatches();
   cleanSymlinks();
+  // ★ +ios24.3：profile 里旧版本核心包会遮蔽运行时并把插件行 disabled，
+  //   必须在 boot 之前隔离，否则 directoryPicker/会话持久化都不装配。
+  quarantineShadowedCore();
   // ★ +ios14：逐个兜底不可写的 session.v4.jsonl（含 root 444 历史文件）。
   healSessionFiles();
   // 顶层与 profile 级单文件兜底

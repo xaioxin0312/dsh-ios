@@ -338,16 +338,30 @@ if [ "$TAG" != "ios18" ]; then
     echo "    版本标签: +$TAG（并列实验档，不覆盖 +ios18）"
 fi
 # +ios24.x 的 changelog 只写在 stage 副本里：共享 control 原文件一个字节不动。
-# +ios18 是已冻结的对照档（927b5308…），当前源码面向 +ios24.2，不再承诺
+# +ios18 是已冻结的对照档（927b5308…），当前源码面向 +ios24.3，不再承诺
 # 从当前 HEAD 重新构建 +ios18 能 1:1 复现当时的历史产物。
-case "$TAG" in ios24.1|ios24.2) ;; *) skip_changelog=1 ;; esac
+case "$TAG" in ios24.1|ios24.2|ios24.3) ;; *) skip_changelog=1 ;; esac
 if [ "${skip_changelog:-0}" != "1" ]; then
     python3 - "$STAGE/DEBIAN/control" "$TAG" <<'PY'
 import sys
 p, tag = sys.argv[1:3]
 s = open(p, encoding='utf-8').read()
 extra = ""
-if tag == "ios24.2":
+if tag == "ios24.3":
+    extra = """ * 继续修「工作区/对话加载不出」的第二个根因（装过插件、从 rc.5 升级的
+   设备必现）：dsh plugin add 后 pnpm 的 hoisted 布局会把 @deepseek-ai
+   核心包也装进 profiles/<name>/node_modules；boot 按 profile 优先进
+   行模块解析，于是 rc.3 的 directory-picker 行拿到 rc.5 旧副本，版本
+   守卫判定不兼容后把整行 disabled，directoryPickerController 永远
+   unavailable（typert gateway: active Service ... is unavailable）；
+ * 启动前的 heal 现在会隔离「运行时同名、版本不同」的核心包副本到
+   $DSH_HOME/.dsh-compat-quarantine（带版本号备份，不删除），用户自己
+   装的第三方插件一律不动；隔离后目录选择器与会话持久化都走运行时
+   版本，rc.5 创建的明文会话/工作区原样加载；
+ * 保留 +ios24.2 的 zstd→none 明文会话兼容与 darwin→browse 目录选择器
+   两项修复。
+"""
+elif tag == "ios24.2":
     extra = """ * 修「工作区/对话加载不出」：会话默认压缩 zstd 改回 none，兼容用户从
    +ios15/+ios18 升级带来的明文 .jsonl 会话（不再触发 checkRootEncoding
    全局 fatal，workspace/session/directoryPicker 控制器全部正常装配）；
