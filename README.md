@@ -8,14 +8,112 @@
 > 关于 Node 24.9：**（rc.1 时代的历史结论）** 当时公开可得的 iOS arm64 Node 可执行文件确实不存在（详见 [`docs/DSH-NODE-UPGRADE-EVALUATION.md`](docs/DSH-NODE-UPGRADE-EVALUATION.md)），但实证发现官方 `0.2.2-rc.1` 的四处 Node 22.12 兼容补丁锚点与 `0.2.1-rc.5` **逐字一致**，因此用同一套补丁 + 同一个已验证的 Node 22.12.0，做出了经 31 项核验（含真 boot、会话创建与恢复）的完整升级包。
 >
 > **⚠️ 2026-11-14 更正**：上面「不存在」的结论已被本仓库自己的 CI 推翻 —— GitHub Actions run `43532556241` 成功编译出 **Node v24.19.0 iOS arm64 独立 CLI**（artifact `14095226518` / Release `node24-exp`，SHA `8bebb2a2…`）。且 rc.3 的 `engines.node >= 24.9.0` **不是 advisory**（`bin.js` 用 `import.meta.main`）。故 rc.3 单包已改用该成品。首版 `+ios24` 在 A11 真机上暴露运行时不兼容，
-**当前推荐档位是 `+ios24.7` 正式版**（操控提速 + 灵动岛实时进度 + 自启兜底），
-详见下方「正式版 +ios24.7」章节与 `one-package/README.md`。
+**当前推荐档位是 `+ios24.8` 正式版**（实时进度主通道搬进 DSH 界面 + 操控效率与可见性全面优化），
+详见下方「正式版 +ios24.8」章节与 `one-package/README.md`。
 
 ---
 
-## 正式版 · `+ios24.7`（2026-11-15，操控提速 + 灵动岛实时进度 + 自启兜底）
+## 正式版 · `+ios24.8`（2026-11-15，实时进度可见 + 操控效率全面优化）
 
 > 当前推荐安装的正式版。Release 附件：
+> `dev.airdevs.dsh_0.2.2-rc.3+ios24.8_iphoneos-arm64.deb`。
+> 适用 iPhone X (A11, arm64) / iOS 15–16.7.x / Dopamine rootless (`/var/jb`)。
+
+`+ios24.7` 已经把操控提速了，但真机上「**实时进度完全没有、HUD 也完全不可见**」：
+进度只押在 SpringBoard 的灵动岛胶囊上，而那个 HUD 初始 `alpha=0`、纯事件驱动、
+`windowLevel=2000` 被灵动岛插件盖住、只取 `activeScene`（Web Clip 全屏下 SpringBoard
+常常没有 active scene），再加上旧插件 `8090` 直连块可能让 DSH 直接绕过 `8091`
+bridge —— 事件根本不会产生。本版把进度做成**双通道**，并顺着 DSH GO 的做法
+继续压缩模型往返。
+
+### 1) 主通道：DSH 页面内的常驻进度卡片
+
+`one-package/dsh-ios-live-progress.js` 在构建期同步注入 `index.html`（module 之前），
+纯原生 JS、零依赖、兼容 Safari 16.6 / Web Clip。DSH 界面**右下角常驻**一张卡片：
+
+- 状态机：`待命 / 思考中 / 等待界面 / 执行中 / 已完成 / 失败`；工具调用折叠成一行；
+- 当前工具、当前动作、第 `n/N` 步、实时耗时、进度线、可折叠事件流；
+- **SSE 主通道** `/events` + **XHR/fetch 轮询兜底** `/progress`（Safari/Web Clip 拦 SSE 时自动切）+
+  **DOM 观察终极兜底**（桥不可达时从页面里的工具调用 DOM 反推进度）；
+- 断线用 `Last-Event-ID` / `?since=<seq>` 续传，不丢历史事件；
+- `MutationObserver` 在 SPA 重渲染摘掉容器时自动挂回。
+
+> 这一层**不依赖灵动岛插件、不需要 respring、装完即可见**，用户 100% 能在
+> DSH 界面里看到进度 —— 这是与 DSH GO「进度在 App 自己 UI 里」对齐的主通道。
+
+### 2) 事件总线（bridge 侧）
+
+`phone-bridge/server.cjs` 新增 `emitEvent()` / `eventRing`（240 条有界环形缓冲）/
+`snapshot` / `sseClients` / 单调递增 `seq`，并新增：
+
+| 端点 / 机制 | 作用 |
+| --- | --- |
+| `GET /events` | `text/event-stream`，支持 `Last-Event-ID` 与 `?since=` 补发历史 |
+| `GET /progress?since=N` | 轮询兜底，返回增量事件 + 当前快照 |
+| `GET /health` | `version: 2.0.0`，暴露 `progress.sse` / `progress.poll` 便于诊断 |
+| `writeIdleHud()` | 启动即写 `hud.json`，非 running 态持续刷 idle 常驻（不再纯事件驱动） |
+
+`tools/call` 统一推 `tool_start` / `tool_done` / `error` 事件，`phone_act` 逐步推
+`step / total / elapsed_ms`。`hud.json` 新增 `level` 与 `seq`。
+
+### 3) 修好 SpringBoard HUD（辅助通道）
+
+`HUDOverlay.m` 重写并由 GitHub Actions `macos-15` **重新编译归档二进制**：
+
+- 启动即显示 `alpha=0.62` 的「DSH 就绪 / 等待任务 · 桥已连接」常驻胶囊，
+  完成/失败后回落到待命态而**不再淡出到透明**；
+- 默认 `windowLevel=1000000` 盖过灵动岛插件，且支持从 `hud.json` 动态覆盖 `level`；
+- 遍历**所有** `connectedScenes`，scene 晚到时 `attachLateScenes` 补窗口，
+  一个 scene 都没有时用 `[UIScreen mainScreen].bounds` 建无 scene 兜底窗口；
+- 写回 `/var/mobile/Library/DSH/hud.ack.json`（`loaded / phase / windows / level /
+  last_apply_at`），`dsh-phone-bridge-ctl hud` 可直接确认注入是否真的加载；
+- `install_name` 改回 rootless 真实路径 `/var/jb/Library/MobileSubstrate/...`；
+- `hitTest` 恒 `nil`，依旧不拦截触摸。
+
+`dsh-extras-postinst.sh` 另把 `/var/mobile/Library/DSH` 目录属主固定为 `mobile(501)`
+—— bridge daemon 以 root 建目录时 SpringBoard 写不进 ack，也是「不可见且无法诊断」的一环。
+该目录只放本包运行时状态，**不是 `$DSH_HOME`**，安装期依旧零写入用户数据。
+
+### 4) 8090 同名冲突去重
+
+旧生态插件 `plugins/dsh-ios-phone-control` 与内置 bridge 都注册 `serverName: ios`，
+前者直连 `127.0.0.1:8090`。DSH 若连到 8090 就绕过 bridge，事件流和 HUD 全部不产生。
+`ensure-config.cjs` 现在注册 `8091` 时自动移除该冲突块（含遗留注释），保留用户其它
+插件块与自定义 `toolCallTimeoutMs`，重复执行返回 `unchanged`、不碰文件 mtime。
+
+### 5) 继续压缩模型往返
+
+| 新增 | 说明 |
+| --- | --- |
+| `find_element` / `wait_for_text` | 元素查找与文本等待交给设备端，不再「截图 → 模型看图 → 再决定」 |
+| `progress_status` | 直接读事件总线快照，供 AI 与诊断使用 |
+| `phone_act` 预校验 | `validateSteps()` 整批先校验，非法动作立即拒且一步不执行 |
+| 紧凑 UI / 增量 diff | `compactUI()` 返回纯文本可点元素，`uiDelta()` 只回变化部分，不再整棵 JSON 树 |
+| 更多批量步骤 | `find` / `wait_text` / `assert` / `screenshot`；`stop_on_error` 单步失败即停 |
+| `full_ui` | 需要时仍可回退完整 UI 树 |
+
+### 安装与诊断
+
+```sh
+dpkg -i dev.airdevs.dsh_0.2.2-rc.3+ios24.8_iphoneos-arm64.deb
+respring   # 只为让原生触控层与 SpringBoard HUD 生效；页面内进度卡片无需 respring
+
+dsh-phone-bridge-ctl hud    # ack / hud.json / /progress / 面板主通道 一次看全
+```
+
+所有历史修复（`+ios24.7` 提速与自启兜底、`+ios24.6` 图片支持、`+ios24.2` 工作区/
+对话加载、`+ios24.1` 零 JIT/doctor/Web Clip、固定 token、全屏入口）全部保留，
+升级不丢对话 / 工作区 / 插件 / 配置。
+
+核验：`sh one-package/verify-one-package.sh <deb>`（含 7b 章进度面板与 HUD 新旧二进制
+断言）、`sh phone-bridge/verify-phone-bridge.sh`（5 章共 51 项，含 SSE/轮询/续传/
+工具事件端到端实测）。
+
+---
+
+## 上一版 · `+ios24.7`（2026-11-15，操控提速 + 灵动岛实时进度 + 自启兜底）
+
+> 历史交付（已被 `+ios24.8` 取代）。Release 附件：
 > `dev.airdevs.dsh_0.2.2-rc.3+ios24.7_iphoneos-arm64.deb`
 > （SHA-256 `2e16d17172e611d07235451b53d730cad5a4ce558cc28a0395efc1f4d3bd04b8`）。
 > 适用 iPhone X (A11, arm64) / iOS 15–16.7.x / Dopamine rootless (`/var/jb`)。

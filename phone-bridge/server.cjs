@@ -58,6 +58,8 @@ const CMD_TIMEOUT = Number(process.env.DSH_BRIDGE_CMD_TIMEOUT || 60000);
  * Web UI 面板是主通道，原生 HUD 只是跨 App 兜底。
  */
 const HUD_PATH = process.env.DSH_HUD_PATH || '/var/mobile/Library/DSH/hud.json';
+// 与 HUDOverlay.m 的 kDSHDefaultLevel 一致；灵动岛插件层级更高时可调大。
+const HUD_LEVEL = Number(process.env.DSH_HUD_LEVEL || 1000000);
 const EVENT_CAP = 240;
 const SSE_PING_MS = 15000;
 const HUD_HEARTBEAT_MS = 2000;
@@ -110,7 +112,9 @@ function emitEvent(state, detail, extra) {
         elapsed_ms: hudStart ? now - hudStart : 0,
         ok: e.ok === undefined ? null : !!e.ok,
         run_id: e.run_id || ('r' + (runSeq || 1)),
-        ttl_ms: Number(e.ttl || (st === 'running' ? 30000 : 1600))
+        // done/error 的 ttl 必须大于心跳间隔(2000ms)，否则旧版 HUD 会在
+        // 心跳把状态刷回「待命」之前先淡出到 alpha=0（真机「做完就消失」）。
+        ttl_ms: Number(e.ttl || (st === 'running' ? 30000 : 2800))
     };
     eventRing.push(snapshot);
     if (eventRing.length > EVENT_CAP) eventRing.shift();
@@ -125,7 +129,9 @@ function emitEvent(state, detail, extra) {
         total: snapshot.total,
         elapsed_ms: snapshot.elapsed_ms,
         ts: snapshot.ts,
-        ttl_ms: st === 'idle' ? 86400000 : snapshot.ttl_ms
+        ttl_ms: st === 'idle' ? 86400000 : snapshot.ttl_ms,
+        level: HUD_LEVEL,
+        seq: snapshot.seq
     });
 
     // SSE 广播
@@ -143,15 +149,32 @@ function hudPublish(state, detail, extra) {
 
 /* 空闲心跳：让 hud.json 的 mtime 持续变化，原生 HUD 保持常驻可见；
  * 同时给 SSE 客户端发 ping，防止 iOS Safari 把长连接判死。
- * 心跳不写入事件环（避免刷屏），只刷新文件与当前快照时间。
+ * 心跳不写入事件环（避免刷屏），只刷新文件。
+ *   - running 态：不覆盖（让事件自己驱动，保持脉冲动画）；
+ *   - done/error 态：保留 ttl 展示窗口，超时后落回「待命常驻」；
+ *   - idle/ready 态：每 2s 重写，保证旧版 HUD 也不会淡出到 alpha=0。
+ * 写的是 state:'idle'（新版 HUD 识别为低亮度待命；旧版走 done 分支但
+ * ttl 极长不淡出），绝不写 'running' 以免胶囊长期误报「执行中」。
  */
+function writeIdleHud() {
+    writeHud({
+        v: 2, state: 'idle', title: 'DSH 就绪', detail: '等待任务 · 桥已连接',
+        step: 0, total: 0, elapsed_ms: 0,
+        ts: Date.now(), ttl_ms: 86400000, level: HUD_LEVEL, seq: eventSeq
+    });
+}
 setInterval(() => {
-    if (snapshot.state === 'idle' || snapshot.state === 'ready') {
-        writeHud({
-            v: 2, state: 'running', title: 'DSH 就绪', detail: '等待任务 · 桥已连接',
-            step: 0, total: 0, elapsed_ms: Date.now() - idleSince,
-            ts: Date.now(), ttl_ms: 86400000
-        });
+    const s = snapshot.state;
+    // running 态不覆盖：让事件自己驱动，保持脉冲动画与实时步数。
+    // 其余（idle/ready/done/error）统一刷成待命常驻：done/error 由
+    // emitEvent 当场写入并展示一个心跳周期，随后平滑落回待命，
+    // 期间 mtime 每 2s 变化，旧版 HUD 也没有淡出空窗。
+    if (s !== 'running' && s !== 'thinking' && s !== 'waiting') {
+        writeIdleHud();
+        if (s !== 'idle' && s !== 'ready') {
+            snapshot = Object.assign({}, snapshot, { state: 'idle', title: 'DSH 就绪',
+                detail: '等待任务 · 桥已连接', elapsed_ms: 0 });
+        }
     }
     for (const c of sseClients) {
         try { c.write(': ping\n\n'); } catch (_) { sseClients.delete(c); }

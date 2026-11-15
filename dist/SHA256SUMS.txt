@@ -223,6 +223,24 @@ bce5bf18cf3417110b47fa651001331a8cf87ebe7d9a23c5db73b6baaee7497d  dev.airdevs.ds
 #   与 +ios24.6 文件清单 diff 仅上述 7 项新增/变更。
 2e16d17172e611d07235451b53d730cad5a4ce558cc28a0395efc1f4d3bd04b8  dev.airdevs.dsh_0.2.2-rc.3+ios24.7_iphoneos-arm64.deb
 
+# +ios24.8（2026-11-15）：实时进度双通道 + 操控效率优化，从 rc.3 bundle
+#   完整重建（非 overlay）。新增 one-package/dsh-ios-live-progress.js 面板
+#   注入 index.html、server.cjs 事件总线（SSE /events + 轮询 /progress +
+#   Last-Event-ID 续传 + 启动即写 hud.json）、find_element / wait_for_text /
+#   progress_status 与 phone_act 整批预校验+紧凑 UI+增量 diff、
+#   ensure-config 清理 8090 同名冲突、ctl hud 诊断、postinst 把 HUD 状态
+#   目录属主设为 mobile；HUDOverlay.m 重写并由 build-native-hud.yml
+#   （macos-15, run 43709863856）重编归档二进制，安装进 deb。
+# 核验：verify-one-package.sh 130 项全过（含 7b 进度面板 / 新编 HUD 二进制
+#   断言、静态 URL 鉴权黑盒、数据零改动实测、两次构建字节级可复现）；
+#   verify-phone-bridge.sh 51 项全过（含 SSE/轮询/续传/工具事件端到端实测）。
+#   顺带修掉 make_node24_runtime.py 里 HERE 未定义的既有 bug（+ios24.6
+#   引入，此前 24.6/24.7 走 deb overlay 没触发完整构建）。
+2357ce12e0eb6b7dc766576cc46e9b29838533b668644e01e26508692153b896  dev.airdevs.dsh_0.2.2-rc.3+ios24.8_iphoneos-arm64.deb
+# 归档 HUD 二进制（新编版，含 hud.ack.json / last_apply_at / rootless install_name）；
+# 路径相对 dist/。deb 内的是同一份，可用 dpkg-deb -x 后比对。
+fb2c27549482c42ebbe7b7ab31bda6217350a5563d83bae78533e7808aa87b24  ../phone-bridge/native/hud/dsh-ios-hud.dylib
+
 # --- 可选生态插件（手动安装，不预装）---
 f9f74e0f485148acfe544b88e35c17da196b6ff4c6da4f7a6576a7c566cd068a  dsh-ios-phone-control-0.1.0.tgz
 

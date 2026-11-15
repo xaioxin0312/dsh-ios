@@ -35,6 +35,11 @@
 import os
 import sys
 
+# 本文件所在目录（one-package/）。+ios24.6 的图片 shim 从这里读取；
+# 注意 shell 构建脚本里也有一个同名 $HERE，但 Python 侧必须自己定义，
+# 否则从 bundle 完整构建时会在 0b 段抛 NameError（此前 +ios24.6/24.7
+# 是以上一版 deb 为基线 overlay 手打的，没走到这一段，bug 一直没暴露）。
+HERE = os.path.dirname(os.path.abspath(__file__))
 STAGE = sys.argv[1]
 D = os.path.join(STAGE, "var/jb/usr/lib/dsh")
 B = os.path.join(STAGE, "var/jb/usr/bin")

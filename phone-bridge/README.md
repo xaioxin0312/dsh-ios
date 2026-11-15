@@ -3,9 +3,58 @@
 让「启动 DSH，DSH 就能直接调用工具操作手机」成立。**+ios24.6 起随主
 deb（`dev.airdevs.dsh`）一起安装**：原生层、bridge、launchd 自启、MCP
 注册全部开箱即用；不再依赖单独的 app 包或手动装 ios-mcp。**+ios24.7**
-起再加组合动作 / 看屏 / 实时进度 HUD 与用户会话自启兜底。
+起再加组合动作 / 看屏 / 实时进度 HUD 与用户会话自启兜底。**+ios24.8**
+把实时进度改成「DSH 页面内主通道 + SpringBoard HUD 辅助」的双通道，
+修好真机上进度完全不可见，并继续压缩 see-act 往返。
 
-## +ios24.7：操控提速、实时进度与自启兜底
+## +ios24.8：实时进度双通道、事件总线与效率工具
+
+> 真机症状：`+ios24.7` 的进度只押在 SpringBoard 灵动岛胶囊上，iPhone X
+> 即便用插件开了灵动岛也**完全没有实时进度，HUD 也完全不可见**。
+
+**主通道在 DSH 自己的 Web UI 里**（`one-package/dsh-ios-live-progress.js`，
+构建期注入 `index.html`）：右下角常驻卡片，状态机 `待命/思考中/等待界面/
+执行中/已完成/失败`、当前工具与动作、第 `n/N` 步、实时耗时、进度线、可折叠
+事件流。不依赖灵动岛插件、不需要 respring。三级兜底：`SSE /events` →
+`XHR/fetch /progress` 轮询 → 页面 DOM 观察；断线用 `Last-Event-ID` / `?since=`
+续传；`MutationObserver` 防 SPA 重渲染摘除。
+
+**事件总线**（`server.cjs`）：`emitEvent()` + 240 条 `eventRing` + `snapshot` +
+单调递增 `seq`，`sseClients` 广播，`writeIdleHud()` 启动即写并持续刷 idle。
+
+| 端点 | 用途 |
+| --- | --- |
+| `GET /events` | SSE 主通道，`text/event-stream`，支持历史补发与 `retry: 1200` |
+| `GET /progress?since=N` | 轮询兜底，返回增量事件 + 快照 |
+| `GET /health` | `version: 2.0.0`、`progress.sse` / `progress.poll`、`hud_file` |
+
+`tools/call` 统一推 `tool_start` / `tool_done` / `error`；`phone_act` 逐步推
+`step / total / elapsed_ms`。`hud.json` 新增 `level`（HUD 层级可动态覆盖）与 `seq`。
+
+**HUD 辅助通道修复**（`native/hud/HUDOverlay.m`，已由 `macos-15` CI 重编归档）：
+启动即 `alpha=0.62` 常驻胶囊、默认 `windowLevel=1000000` 盖过灵动岛插件、
+遍历所有 `connectedScenes` + 无 scene 兜底窗口 + 晚到 scene 补挂、完成/失败
+回落待命态不再淡出到透明、写回 `hud.ack.json` 供诊断、`install_name` 改
+rootless 真实路径。`dsh-extras-postinst.sh` 把 `/var/mobile/Library/DSH`
+属主固定为 `mobile(501)`，否则 SpringBoard 写不进 ack。
+
+**8090 同名冲突去重**：`ensure-config.cjs` 注册 `8091` bridge 时自动移除
+`plugins/dsh-ios-phone-control` 的 `8090` 直连块（两者 `serverName` 都是 `ios`，
+DSH 连错端口就绕过 bridge、事件根本不产生），保留用户其它插件块与自定义配置，
+重复执行 `unchanged`。
+
+**效率工具**：新增 `find_element` / `wait_for_text` / `progress_status`；
+`phone_act` 增加 `validateSteps()` 整批预校验（非法动作一步不执行）、
+`compactUI()` 纯文本可点元素 + `uiDelta()` 增量 diff（不再整棵 JSON 树）、
+`find` / `wait_text` / `assert` / `screenshot` 步骤、`stop_on_error`，
+`full_ui` 可按需回退完整 UI 树。
+
+```sh
+dsh-phone-bridge-ctl hud    # ack / hud.json / /progress / 面板主通道 一次看全
+sh phone-bridge/verify-phone-bridge.sh   # 51 项，含事件流端到端实测
+```
+
+## +ios24.7（历史）：操控提速、实时进度与自启兜底
 
 ### 三个减少模型往返的工具
 
@@ -26,7 +75,10 @@ wait_for_change(timeout_ms=5000, poll_ms=120)
 `initialize + tools/list`（每次多 3 个本地回环）。现在工具清单 30s 缓存，
 未命中才刷新；mock 端到端测试里整个流程 `initialize` / `tools/list` 各只 1 次。
 
-### 灵动岛实时进度（`dsh-ios-hud.dylib`）
+### 灵动岛实时进度（`dsh-ios-hud.dylib`）—— +ios24.7 原始实现
+
+> **注意：下面几条 `+ios24.7` 的行为正是真机「HUD 完全不可见」的根因，
+> 已在 `+ios24.8` 全部修正（见上一章）。保留此处供对照排查。**
 
 SpringBoard 注入的悬浮胶囊，读 `/var/mobile/Library/DSH/hud.json`
 （bridge 用「写临时文件 + rename」原子更新，不依赖 IPC）：
@@ -39,8 +91,15 @@ SpringBoard 注入的悬浮胶囊，读 `/var/mobile/Library/DSH/hud.json`
 - HUD 未加载 / `hud.json` 不可写时，`hudPublish()` 静默失败，
   操控链路完全不受影响。
 
+旧实现的四个致命点：初始 `alpha=0` 且**纯事件驱动**（只有 `tools/call`
+才写 `hud.json`，空闲时胶囊根本不显示）；`windowLevel=2000` 被灵动岛插件
+遮挡；只取 `activeScene`（全屏 Web Clip 下 SpringBoard 常无 active scene）；
+没有任何 ack，无法判断 dylib 到底加载没有。`+ios24.8` 改为启动即常驻、
+`windowLevel=1000000`、遍历所有 scene + 无 scene 兜底、写 `hud.ack.json`。
+
 HUD 由 GitHub Actions `macos-15` 编译（`.github/workflows/build-native-hud.yml`），
-`native/hud/build-hud.sh` 是等价的本地命令。
+`native/hud/build-hud.sh` 是等价的本地命令；改完 `HUDOverlay.m` 后**必须重编
+并替换 `native/hud/dsh-ios-hud.dylib` 归档二进制**，否则真机仍是旧行为。
 
 ### 自启兜底（`dsh-autostart`）
 
@@ -99,7 +158,7 @@ bridge 再把它们与本机 A 层工具合并到 `127.0.0.1:8091/mcp`。
 | `dev.airdevs.dsh.phone-bridge.plist` | `/var/jb/Library/LaunchDaemons/` | `RunAtLoad + KeepAlive`，`UserName=mobile` |
 | `dsh-autostart` | `/var/jb/usr/bin/` | +ios24.7 `status\|repair\|logs`：两级 launchd / 端口 / 日志诊断 |
 | `dsh-autostart-agent` + `dev.airdevs.dsh.agent.plist` | `/var/jb/usr/bin/` + `/var/jb/Library/LaunchAgents/` | 用户会话兜底：SpringBoard 启动时 3080 未就绪才拉起 daemon |
-| `verify-phone-bridge.sh` | 仅仓库 | 本地 28 项验证（真 MCP 握手 / 工具调用 / 上游转发 / 配置 schema / 零 JIT） |
+| `verify-phone-bridge.sh` | 仅仓库 | 本地 51 项验证（真 MCP 握手 / 工具调用 / 上游转发 / 配置 schema / 零 JIT / **SSE 事件流与续传端到端**） |
 
 MCP 注册不在 daemon 里做（避免改写用户配置的嫌疑），而由
 `/var/jb/usr/bin/dsh` wrapper 在每次启动 DSH **之前**以当前用户
@@ -130,7 +189,10 @@ MCP 注册不在 daemon 里做（避免改写用户配置的嫌疑），而由
 `8090` 是 ios-mcp 原生层的默认端口，不能抢占。DSH 侧配置固定连
 `http://127.0.0.1:8091/mcp`；旧的 `plugins/dsh-ios-phone-control`（直连
 8090）仍可独立使用，但不要与内置注册同时启用（两者 `serverName` 都是
-`ios`，工具前缀都会是 `mcp__ios__*`）。
+`ios`，工具前缀都会是 `mcp__ios__*`）。**+ios24.8 起 `ensure-config.cjs`
+会在注册 `8091` 时自动移除这条旧 8090 块**（连遗留注释一起清），否则 DSH
+可能连到 8090 绕过 bridge，事件流与 HUD 就完全不产生。用户其它插件块、
+自定义的 `toolCallTimeoutMs` 等配置原样保留。
 
 ## 安全
 
@@ -148,12 +210,16 @@ MCP 注册不在 daemon 里做（避免改写用户配置的嫌疑），而由
 ## 验证
 
 ```sh
-sh phone-bridge/verify-phone-bridge.sh   # 28 项
+sh phone-bridge/verify-phone-bridge.sh   # 51 项
 sh app-bundle/verify-app.sh              # 73 项（含 16 项工具链断言）
 ```
 
 端到端验证用包内 `@modelcontextprotocol/client` 真跑 `initialize` +
 `tools/list` + `tools/call`，并用假上游 ios-mcp 验证 B 层合并与转发。
+第 5 章另起一个 bridge 实例，实测 `/health` 暴露进度端点、启动即有
+`idle` 事件与 `hud.json`、SSE 首帧与 `Last-Event-ID` 续传、工具调用推
+`tool_start`、`phone_act` 预校验拒绝非法动作并推 `error`、`?since=` 增量过滤，
+同时确认归档 HUD dylib 是新编版（含 `hud.ack.json`）。
 真机侧的 ldid 伪签 / respring 注入 / HID 注入仍需在设备上确认。
 
 [witchan/ios-mcp]: https://github.com/witchan/ios-mcp

@@ -175,6 +175,21 @@ for m in 'safari16-polyfill.js' 'dsh-ios-manual-install-transform.js'; do
     node --check "$FRONT/assets/$m" || { echo "构建中止：assets/$m 语法错误" >&2; exit 1; }
 done
 
+# [4b/6] +ios24.8 实时进度面板 —— 注入 DSH Web UI 内部（用户 100% 看得见的位置）。
+# 单包专用注入脚本，绝不动共享 shims/apply_frontend_inject.cjs（保护 +ios15 SHA）。
+echo "==> [4b/6] 注入 DSH Web UI 内嵌实时进度面板"
+node "$HERE/apply_live_progress_inject.cjs" \
+    "$FRONT" \
+    "$HERE/dsh-ios-live-progress.js" || exit 1
+LP="$FRONT/assets/dsh-ios-live-progress.js"
+grep -q 'dsh-ios-live-progress.js' "$FRONT/index.html" || { echo "构建中止：index.html 缺进度面板引用" >&2; exit 1; }
+[ -f "$LP" ] || { echo "构建中止：缺 assets/dsh-ios-live-progress.js" >&2; exit 1; }
+node --check "$LP" || { echo "构建中止：进度面板脚本语法错误" >&2; exit 1; }
+for needle in '127.0.0.1:8091' '/events' '/progress'; do
+    grep -qF "$needle" "$LP" || { echo "构建中止：进度面板缺 $needle（疑似空壳）" >&2; exit 1; }
+done
+echo "    进度面板已注入（SSE 主通道 + 轮询兜底 + DOM 观察终极兜底）"
+
 echo "==> [5/6] 内置纯 JS pnpm（让「安装插件前需配置 pnpm 环境」不再出现）"
 PNPMSRC="$ROOT/bundles/pnpm"
 if [ ! -f "$PNPMSRC/bin/pnpm.cjs" ] || [ ! -f "$PNPMSRC/dist/pnpm.cjs" ]; then
@@ -212,6 +227,7 @@ done
 for spec in \
   "@deepseek-ai/dsh-web-frontend/dist/assets/safari16-polyfill.js|AbortSignal.any" \
   "@deepseek-ai/dsh-web-frontend/dist/assets/dsh-ios-manual-install-transform.js|__dshIosTransformSpec" \
+  "@deepseek-ai/dsh-web-frontend/dist/assets/dsh-ios-live-progress.js|127.0.0.1:8091" \
   "@deepseek-ai/dsh-plugin-manager/lib/index.js|git-probe-shortcircuit" \
   "@deepseek-ai/dsh-plugin-market/lib/index.js|redirect: \"follow\"" \
   "@deepseek-ai/dsh-client-ui-plugin-manager/lib/client.js|__dshIosTransformSpec"; do
@@ -381,14 +397,35 @@ fi
 # +ios24.x 的 changelog 只写在 stage 副本里：共享 control 原文件一个字节不动。
 # +ios18 是已冻结的对照档（927b5308…），当前源码面向 +ios24.6，不再承诺
 # 从当前 HEAD 重新构建 +ios18 能 1:1 复现当时的历史产物。
-case "$TAG" in ios24.1|ios24.2|ios24.3|ios24.4|ios24.5|ios24.6|ios24.7) ;; *) skip_changelog=1 ;; esac
+case "$TAG" in ios24.1|ios24.2|ios24.3|ios24.4|ios24.5|ios24.6|ios24.7|ios24.8) ;; *) skip_changelog=1 ;; esac
 if [ "${skip_changelog:-0}" != "1" ]; then
     python3 - "$STAGE/DEBIAN/control" "$TAG" <<'PY'
 import sys
 p, tag = sys.argv[1:3]
 s = open(p, encoding='utf-8').read()
 extra = ""
-if tag == "ios24.7":
+if tag == "ios24.8":
+    extra = """ * 实时进度「看得见」：进度主通道搬进 DSH Web UI 内（右下角常驻面板），
+   对标 DSH Go 的状态机与工具调用折叠——状态灯 / 当前动作 / 第 n/N 步 /
+   实时耗时 / 进度线 / 可折叠事件流，全程不依赖 SpringBoard 注入与灵动岛；
+   SSE 主通道 + 轮询兜底 + 页面 DOM 观察终极兜底，断线按 seq 增量续传；
+ * 修 HUD 完全不可见：旧版只有 tools/call 才写 hud.json、窗口初始全透明，
+   没有事件就一个像素都不画；现在桥启动即发「就绪」并 2s 心跳常驻，
+   HUD 改为启动即显示待命胶囊、windowLevel 提升到灵动岛插件之上、
+   遍历所有 UIWindowScene 兜底（全屏 Web Clip 前台时 SpringBoard 未必有
+   active scene），并写回 hud.ack.json 供 dsh-phone-bridge-ctl hud 自检；
+ * 修进度根本不产生的隐性根因：ensure-config 注册 8091 时自动清掉
+   serverName 同为 ios 的旧 8090 直连块（否则 DSH 绕过 bridge，
+   事件流零产生，HUD 与面板都永远「待命」）；
+ * 操控效率：新增 find_element（按文本直接给可点坐标）、wait_for_text
+   （设备端等文本出现/消失）、progress_status；phone_act 支持整批预校验、
+   find / wait_text / assert / screenshot 步骤，返回紧凑纯文本 UI 与
+   增量 diff，避免「截图 -> 模型认坐标 -> 再点 -> 再截图」的往返；
+ * 保留 +ios24.7 的组合动作 / 看屏 / 灵动岛胶囊 / 自启兜底，以及
+   +ios24.6 图片支持、+ios24.2 会话兼容等全部历史修复，升级不丢
+   插件 / 工作区 / 对话 / 配置。
+"""
+elif tag == "ios24.7":
     extra = """ * 手机操控提速：phone_act 一次调用执行整串动作（点按/输入/滑动/
    按键/回主屏/打开 App/等待），随后等待界面稳定并返回精简 UI，把原来
    5~10 次模型往返压成 1 次；bridge 不再在每次 tools/call 前强制
@@ -504,6 +541,7 @@ for f in \
   "$STAGE/var/jb/usr/lib/dsh/node_modules/@deepseek-ai/dsh-client-connection/lib/index.js" \
   "$STAGE/var/jb/usr/lib/dsh/node_modules/@deepseek-ai/dsh-web-frontend/dist/assets/safari16-polyfill.js" \
   "$STAGE/var/jb/usr/lib/dsh/node_modules/@deepseek-ai/dsh-web-frontend/dist/assets/dsh-ios-manual-install-transform.js" \
+  "$STAGE/var/jb/usr/lib/dsh/node_modules/@deepseek-ai/dsh-web-frontend/dist/assets/dsh-ios-live-progress.js" \
   "$STAGE/var/jb/usr/lib/dsh/node_modules/@deepseek-ai/dsh-plugin-market/lib/worker-parse.cjs" \
   "$STAGE/var/jb/usr/lib/dsh/dsh-extras-postinst.sh" \
   "$STAGE/var/jb/usr/lib/dsh/dsh-extras-prerm.sh" \
@@ -594,6 +632,44 @@ grep -q "upstreamTools(false)" "$STAGE/var/jb/usr/lib/dsh-phone-bridge/server.cj
 sh -n "$STAGE/var/jb/usr/bin/dsh-autostart" || exit 1
 sh -n "$STAGE/var/jb/usr/bin/dsh-autostart-agent" || exit 1
 echo "    实时进度 / 组合动作 / 自启兜底断言通过"
+
+# +ios24.8：实时进度主通道搬进 DSH Web UI + 事件流 + 效率工具 + 8090 去重
+# + HUD 可见性修复。任何一件缺失都不允许出包。
+echo "==> 构建期 +ios24.8 断言（实时进度可见性 / 事件流 / 省往返工具）"
+FR="$STAGE/var/jb/usr/lib/dsh/node_modules/@deepseek-ai/dsh-web-frontend/dist"
+BR="$STAGE/var/jb/usr/lib/dsh-phone-bridge"
+# 1) 前端进度面板真的注入了 index.html 且连的是本机事件端点
+grep -q 'dsh-ios-live-progress.js' "$FR/index.html" || {
+    echo "构建中止：index.html 未注入实时进度面板" >&2; exit 1; }
+[ -f "$FR/assets/dsh-ios-live-progress.js" ] || {
+    echo "构建中止：缺进度面板脚本" >&2; exit 1; }
+node --check "$FR/assets/dsh-ios-live-progress.js" || exit 1
+for needle in '127.0.0.1:8091' '/events' '/progress' 'DOMContentLoaded'; do
+    grep -qF "$needle" "$FR/assets/dsh-ios-live-progress.js" || {
+        echo "构建中止：进度面板缺 $needle" >&2; exit 1; }
+done
+# 2) bridge 事件流：SSE / 轮询 / 启动即写 / 心跳常驻 / 序号续传
+for needle in 'emitEvent' 'text/event-stream' 'Last-Event-ID' '/progress' 'sseClients' \
+              'writeIdleHud' "emitEvent('idle'" 'level: HUD_LEVEL'; do
+    grep -qF "$needle" "$BR/server.cjs" || {
+        echo "构建中止：bridge 缺事件流要素 $needle" >&2; exit 1; }
+done
+# 3) 效率工具（省模型往返）
+for needle in 'find_element' 'wait_for_text' 'progress_status' 'validateSteps' \
+              'compactUI' 'uiDelta' 'stop_on_error'; do
+    grep -qF "$needle" "$BR/server.cjs" || {
+        echo "构建中止：bridge 缺效率工具 $needle" >&2; exit 1; }
+done
+# 4) 8090 冲突去重（否则 DSH 直连 8090 绕过 bridge，进度彻底没有）
+grep -qF 'isConflictingIosBlock' "$BR/ensure-config.cjs" || {
+    echo "构建中止：ensure-config 缺 8090 冲突去重（进度不会产生）" >&2; exit 1; }
+grep -qF '127.0.0.1:8091/mcp' "$BR/ensure-config.cjs" || {
+    echo "构建中止：ensure-config 未注册 8091 bridge" >&2; exit 1; }
+node --check "$BR/ensure-config.cjs" || exit 1
+# 5) ctl 的 HUD 诊断命令
+grep -qF 'hud_diag' "$STAGE/var/jb/usr/bin/dsh-phone-bridge-ctl" || {
+    echo "构建中止：ctl 缺 hud 诊断命令" >&2; exit 1; }
+echo "    +ios24.8 断言通过（进度面板 / SSE / 效率工具 / 8090 去重 / HUD 诊断）"
 for f in "$STAGE/var/jb/usr/bin/dsh" "$STAGE/var/jb/usr/bin/dsh-daemon" \
          "$STAGE/var/jb/usr/bin/dsh-app-ctl" "$STAGE/var/jb/usr/bin/dsh-app-ui" \
          "$STAGE/var/jb/usr/lib/dsh/dsh-extras-postinst.sh" \

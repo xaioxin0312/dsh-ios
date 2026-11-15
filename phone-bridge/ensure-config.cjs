@@ -41,6 +41,22 @@ if (!['on', 'off', 'status'].includes(MODE)) {
 }
 
 const ID = 'dsh-ios-phone-bridge-mcp';
+
+/* +ios24.8：旧的 plugins/dsh-ios-phone-control（用户手动装过的生态插件）
+ * 也用 serverName: ios，但 url 直连 8090（原生 ios-mcp）。两个同名的
+ * MCP 客户端共存时，DSH 可能连到 8090 —— 那样所有 tools/call 都绕过
+ * 8091 bridge，进度事件一个都不会产生，HUD 与 Web 面板永远「待命」。
+ * 这是真机「看不到任何实时进度」的隐性根因之一。注册时把这类冲突块
+ * 整块移除（只认 url 指向 8090 的 dsh-mcp-client，不动用户其它块；
+ * dsh-home-heal.cjs 只删 im-qqbot / xmanrui-dsh-im，两者互不干扰）。
+ */
+function isConflictingIosBlock(text) {
+    if (!/@deepseek-ai\/dsh-mcp-client/.test(text) && !/dsh-ios-phone-control-mcp/.test(text)) return false;
+    if (!/serverName:\s*ios\b/.test(text) && !/dsh-ios-phone-control-mcp/.test(text)) return false;
+    // 旧块：直连 8090，或干脆就是手动装的 phone-control 插件块。
+    return /dsh-ios-phone-control-mcp/.test(text) || /127\.0\.0\.1:8090/.test(text);
+}
+
 const BLOCK = [
     '- insert:',
     '    - id: ' + ID,
@@ -136,32 +152,74 @@ function processFile(p) {
     if (!valid) text = '# dsh-ios phone-bridge: 顶层非数组，已重置\n[]\n';
 
     const has = hasOurBlock(text);
-    if (MODE === 'status') return { file: p, existed, valid: !!valid, registered: has, action: 'none' };
+    if (MODE === 'status') {
+        let conflicts = 0;
+        let ls = text.split('\n');
+        const sp = splitTopBlocks(ls);
+        for (const b of sp.blocks) if (isConflictingIosBlock(b.join('\n'))) conflicts++;
+        return { file: p, existed, valid: !!valid, registered: has, conflicting_8090_blocks: conflicts, action: 'none' };
+    }
 
     let lines = text.split('\n');
     // 单独的 [] 与后面的 "- insert:" 不能共存（YAML 会出现两个顶层值）。
     if (!lines.some((l) => /^-\s/.test(l) || /^-$/.test(l))) {
         lines = lines.filter((l) => !/^\[\s*\]\s*(?:#.*)?$/.test(l.trim()));
     }
-    const { head, blocks } = splitTopBlocks(lines);
-    const kept = blocks.filter((b) => !hasOurBlock(b.join('\n')));
-
-    let next;
-    if (MODE === 'on') {
-        if (has) return { file: p, existed, valid: !!valid, registered: true, action: 'unchanged' };
-        kept.push(BLOCK.split('\n'));
-        next = head.concat(...kept).join('\n').replace(/\n{3,}/g, '\n\n').replace(/\s+$/, '') + '\n';
-        if (!looksValid(next)) return { file: p, action: 'error', error: 'would produce invalid top-level' };
-    } else {
-        if (!has) return { file: p, existed, valid: !!valid, registered: false, action: 'unchanged' };
-        const rest = head.concat(...kept).join('\n').replace(/\n{3,}/g, '\n\n').replace(/\s+$/, '').trim();
-        next = (rest || '[]') + '\n';
-        if (!looksValid(next)) next = '[]\n';
+    let { head, blocks } = splitTopBlocks(lines);
+    let conflicts = 0;
+    const ourBlocks = [];
+    const others = [];
+    // +ios24.8：只精准移除「8090 直连冲突块」；我方已有块原样保留
+    // （用户可能改过 toolCallTimeoutMs 等），其余用户块一律不动。
+    for (const b of blocks) {
+        const t = b.join('\n');
+        if (isConflictingIosBlock(t)) { conflicts += 1; continue; }
+        if (hasOurBlock(t)) { ourBlocks.push(b); continue; }
+        others.push(b);
+    }
+    // 冲突块被删后，head 里可能残留描述它的孤立注释（含 8090 /
+    // phone-control 字样），语义错位且会干扰诊断脚本。只清这类注释行。
+    if (conflicts > 0) {
+        head = head.filter((l) => {
+            if (!/^\s*#/.test(l)) return true;
+            return !/8090|phone-control|ios-mcp/i.test(l);
+        });
     }
 
+    let next;
+    let changed;
+    if (MODE === 'on') {
+        // 保留用户原有我方块；没有才追加标准块。
+        const finalBlocks = others.slice();
+        if (ourBlocks.length) finalBlocks.push(...ourBlocks);
+        else finalBlocks.push(BLOCK.split('\n'));
+        next = (head.length ? head.join('\n') + '\n' : '') +
+               finalBlocks.map((b) => b.join('\n')).join('\n') +
+               '\n';
+        next = next.replace(/\n{3,}/g, '\n\n').replace(/\s+$/, '') + '\n';
+        if (!looksValid(next)) return { file: p, action: 'error', error: 'would produce invalid top-level' };
+        changed = !has || conflicts > 0;
+    } else {
+        const rest = (head.length ? head.join('\n') + '\n' : '') +
+                     others.map((b) => b.join('\n')).join('\n');
+        next = (rest.trim() || '[]').replace(/\n{3,}/g, '\n\n') + '\n';
+        if (!looksValid(next)) next = '[]\n';
+        changed = has || conflicts > 0;
+    }
+    // 幂等：内容完全一致时直接 unchanged，不触碰文件 mtime
+    try { if (fs.readFileSync(p, 'utf8') === next) changed = false; } catch (_) {}
+
+    const baseAction = MODE === 'on' ? (has ? 'unchanged' : 'registered')
+                                     : (has ? 'removed' : 'unchanged');
+    const action = conflicts > 0 ? baseAction + '+removed-8090-conflict' : baseAction;
+    if (!changed) {
+        return { file: p, existed, valid: !!valid, registered: MODE === 'on',
+            conflicting_8090_removed: 0, action: MODE === 'on' ? 'unchanged' : 'unchanged' };
+    }
     const w = atomicWrite(p, next);
     if (w !== true) return { file: p, action: 'error', error: String(w) };
-    return { file: p, existed, valid: !!valid, registered: MODE === 'on', action: MODE === 'on' ? 'registered' : 'removed' };
+    return { file: p, existed, valid: !!valid, registered: MODE === 'on',
+        conflicting_8090_removed: conflicts, action };
 }
 
 const results = targets().map(processFile);

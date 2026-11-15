@@ -202,6 +202,117 @@ else
     bad '缺 fetch-shim.cjs 或验证目录，跳过零 JIT 档'
 fi
 
+sec '5) +ios24.8 实时进度：事件流 / 轮询续传 / 效率工具 / HUD 可见性'
+# 对应用户真机症状「实时进度完全没有、HUD 完全不可见」。除了静态查源码，
+# 还真的起一个 bridge 实例，验证 SSE / 轮询 / 启动即写 hud.json / 工具调用
+# 会推事件 / 断线续传，并确认归档的 HUD 是重编后的新二进制。
+for needle in 'emitEvent' 'text/event-stream' 'Last-Event-ID' '/progress' 'sseClients' \
+              'writeIdleHud' 'level: HUD_LEVEL' 'find_element' 'wait_for_text' \
+              'progress_status' 'validateSteps' 'compactUI' 'uiDelta' 'stop_on_error'; do
+    grep -qF "$needle" "$BR/server.cjs" && ok "server.cjs 含 $needle" || bad "server.cjs 缺 $needle"
+done
+grep -qF 'isConflictingIosBlock' "$BR/ensure-config.cjs" \
+    && ok 'ensure-config 含 8090 冲突去重' || bad 'ensure-config 缺 8090 冲突去重'
+grep -qF 'hud_diag' "$BR/dsh-phone-bridge-ctl" \
+    && ok 'ctl 含 hud 诊断命令' || bad 'ctl 缺 hud 诊断命令'
+HMSRC="$BR/native/hud/HUDOverlay.m"
+for needle in 'hud.ack.json' 'kDSHDefaultLevel' 'connectedScenes' 'alpha = 0.62'; do
+    grep -qF "$needle" "$HMSRC" && ok "HUD 源码含 $needle" || bad "HUD 源码缺 $needle"
+done
+HDYL="$BR/native/hud/dsh-ios-hud.dylib"
+if [ -f "$HDYL" ]; then
+    MAGIC=$(od -An -tx1 -N4 "$HDYL" 2>/dev/null | tr -d ' \n')
+    [ "$MAGIC" = 'cffaedfe' ] && ok '归档 HUD dylib 为 arm64 Mach-O' || bad "HUD dylib magic 异常: $MAGIC"
+    grep -aqF 'hud.ack.json' "$HDYL" \
+        && ok '归档 HUD 二进制为新编版（含 ack）' \
+        || bad '归档 HUD 仍是旧二进制（真机仍会完全不可见）'
+else bad '缺归档 HUD dylib'; fi
+
+cat > "$TMP/progress-check.cjs" <<'JS'
+const http = require('http'), fs = require('fs');
+const port = Number(process.argv[2]), hudPath = process.argv[3];
+function get(p, headers) {
+  return new Promise((resolve, reject) => {
+    const r = http.get({ host: '127.0.0.1', port, path: p, headers: headers || {}, timeout: 3000 }, res => {
+      let b = ''; res.setEncoding('utf8');
+      res.on('data', c => {
+        b += c;
+        if (p.startsWith('/events') && b.includes('event: snapshot')) {
+          resolve({ status: res.statusCode, body: b, headers: res.headers }); res.destroy();
+        }
+      });
+      res.on('end', () => resolve({ status: res.statusCode, body: b, headers: res.headers }));
+    });
+    r.on('error', reject);
+    r.on('timeout', () => { r.destroy(); reject(new Error('timeout ' + p)); });
+  });
+}
+function post(p, obj) {
+  const d = JSON.stringify(obj);
+  return new Promise((resolve, reject) => {
+    const r = http.request({ host: '127.0.0.1', port, path: p, method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(d) }, timeout: 3000 }, res => {
+      let b = ''; res.on('data', c => b += c);
+      res.on('end', () => resolve({ status: res.statusCode, body: b }));
+    });
+    r.on('error', reject); r.on('timeout', () => { r.destroy(); reject(new Error('timeout ' + p)); });
+    r.end(d);
+  });
+}
+function need(c, m) { if (!c) throw new Error(m); }
+(async () => {
+  const h = JSON.parse((await get('/health')).body);
+  need(h.status === 'ok' && h.version === '2.0.0', 'health 版本不对');
+  need(h.progress && /\/events/.test(h.progress.sse) && /\/progress/.test(h.progress.poll), 'health 未暴露进度端点');
+  const p0 = JSON.parse((await get('/progress?since=0')).body);
+  need(p0.seq >= 1 && p0.events.length >= 1, '启动后没有 idle 事件（仍是纯事件驱动）');
+  need(p0.events[0].state === 'idle', '首事件不是 idle');
+  need(p0.snapshot && p0.snapshot.state === 'idle', '快照不是 idle');
+  const hj = JSON.parse(fs.readFileSync(hudPath, 'utf8'));
+  need(hj.state === 'idle' && Number(hj.level) >= 1000000 && Number(hj.seq) >= 1,
+       'hud.json 启动即写/高层级/序号 缺失');
+  const sse = await get('/events?since=0');
+  need(sse.status === 200 && /text\/event-stream/.test(sse.headers['content-type'] || ''), 'SSE 响应头不对');
+  need(/event: (idle|snapshot)/.test(sse.body) && sse.body.includes('"seq"'), 'SSE 首帧无事件数据');
+  const sse2 = await get('/events?since=0', { 'Last-Event-ID': '9999' });
+  need(sse2.body.includes('event: snapshot') && !sse2.body.includes('event: idle'),
+       'Last-Event-ID 续传仍重放了旧事件');
+  const before = JSON.parse((await get('/progress?since=0')).body).seq;
+  const call = await post('/mcp', { jsonrpc: '2.0', id: 1, method: 'tools/call',
+    params: { name: 'progress_status', arguments: {} } });
+  need(call.status === 200 && JSON.parse(call.body).result, 'progress_status 调用失败');
+  const after = JSON.parse((await get('/progress?since=0')).body);
+  need(after.seq > before, '工具调用没有推送事件');
+  need(after.events.some(e => e.action === 'tool_start'), '缺 tool_start 事件');
+  const bad = await post('/mcp', { jsonrpc: '2.0', id: 2, method: 'tools/call',
+    params: { name: 'phone_act', arguments: { steps: [{ action: 'NONSENSE' }] } } });
+  const bj = JSON.parse(bad.body);
+  need(bj.result && (bj.result.isError || /rejected|pre-validation/i.test(JSON.stringify(bj.result))),
+       '整批预校验没有拒绝非法动作');
+  const p3 = JSON.parse((await get('/progress?since=0')).body);
+  need(p3.events.some(e => e.state === 'error'), '预校验失败没有推 error 事件');
+  const tail = JSON.parse((await get('/progress?since=' + before)).body);
+  need(tail.events.length > 0 && tail.events.every(e => e.seq > before), '?since= 续传过滤失效');
+  console.log('PROGRESS_OK seq=' + p3.seq + ' events=' + p3.events.length);
+})().catch(e => { console.error('PROGRESS_FAIL: ' + e.message); process.exit(1); });
+JS
+P5=18093
+DSH_BRIDGE_PORT="$P5" DSH_HOME="$TMP/home5" DSH_HUD_PATH="$TMP/hud5.json" \
+    "$NODE" "$BR/server.cjs" > "$TMP/bridge5.log" 2>&1 & P5PID=$!
+i=0; while [ "$i" -lt 40 ]; do grep -q 'listening on' "$TMP/bridge5.log" 2>/dev/null && break; i=$((i+1)); sleep 0.2; done
+if grep -q 'listening on' "$TMP/bridge5.log" 2>/dev/null; then
+    if "$NODE" "$TMP/progress-check.cjs" "$P5" "$TMP/hud5.json" > "$TMP/progress5.log" 2>&1; then
+        ok "事件流端到端：$(cat "$TMP/progress5.log")"
+    else
+        bad '事件流端到端失败：'
+        sed 's/^/         /' "$TMP/progress5.log" >&2
+    fi
+else
+    bad '事件流 bridge 启动失败：'
+    sed 's/^/         /' "$TMP/bridge5.log" >&2
+fi
+kill "$P5PID" 2>/dev/null || true
+
 printf '\n=== 汇总: OK=%s FAIL=%s ===\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] && echo '✔ 内置手机工具链核验全部通过' || exit 1
 exit 0

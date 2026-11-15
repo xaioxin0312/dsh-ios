@@ -371,6 +371,54 @@ else
     tail -40 "$TMP/vndt.log" >&2
 fi
 
+sec "7b) +ios24.8 实时进度（Web UI 主通道 / SSE / 效率工具 / HUD 注入）"
+# 独立核验：从 deb 解包结果直接查，不复用 build-one-package.sh 的任何结论。
+# 用户真机症状是「实时进度完全没有 / HUD 完全不可见」，所以这里除了查
+# 面板与事件流，还必须确认打进包的 HUD 是【重编后的新二进制】。
+PBDIR="$X/var/jb/usr/lib/dsh-phone-bridge"
+LP="$FRONT/assets/dsh-ios-live-progress.js"
+if [ -f "$LP" ]; then
+    ok "进度面板脚本已打包"
+    node --check "$LP" >/dev/null 2>&1 && ok "进度面板语法通过" || bad "进度面板语法错误"
+    for needle in '127.0.0.1:8091' '/events' '/progress' 'EventSource' 'MutationObserver'; do
+        grep -qF "$needle" "$LP" && ok "面板含 $needle" || bad "面板缺 $needle"
+    done
+else bad "deb 缺进度面板脚本（实时进度主通道没了）"; fi
+grep -qF 'dsh-ios-live-progress.js' "$FRONT/index.html" \
+    && ok "index.html 已注入进度面板" || bad "index.html 未注入进度面板"
+SRV="$PBDIR/server.cjs"
+if [ -f "$SRV" ]; then
+    ok "bridge server.cjs 已打包"
+    node --check "$SRV" >/dev/null 2>&1 && ok "bridge 语法通过" || bad "bridge 语法错误"
+    for needle in 'emitEvent' 'text/event-stream' 'Last-Event-ID' '/progress' \
+                  'sseClients' 'writeIdleHud' 'level: HUD_LEVEL' \
+                  'find_element' 'wait_for_text' 'progress_status' \
+                  'validateSteps' 'compactUI' 'uiDelta' 'stop_on_error'; do
+        grep -qF "$needle" "$SRV" && ok "bridge 含 $needle" || bad "bridge 缺 $needle"
+    done
+else bad "deb 缺 bridge server.cjs"; fi
+grep -qF 'isConflictingIosBlock' "$PBDIR/ensure-config.cjs" \
+    && ok "ensure-config 会清理 8090 同名冲突" || bad "ensure-config 未处理 8090（进度不会产生）"
+grep -qF '127.0.0.1:8091/mcp' "$PBDIR/ensure-config.cjs" \
+    && ok "DSH 注册到 8091 bridge" || bad "未注册 8091 bridge"
+grep -qF 'hud_diag' "$X/var/jb/usr/bin/dsh-phone-bridge-ctl" \
+    && ok "ctl 含 hud 诊断命令" || bad "ctl 缺 hud 诊断命令"
+HDYL="$X/var/jb/Library/MobileSubstrate/DynamicLibraries/dsh-ios-hud.dylib"
+if [ -f "$HDYL" ]; then
+    HM=$(od -An -tx1 -N4 "$HDYL" 2>/dev/null | tr -d ' \n')
+    [ "$HM" = "cffaedfe" ] && ok "HUD dylib 为 arm64 Mach-O" || bad "HUD dylib magic 异常 ($HM)"
+    # 旧二进制没有 ack / 常驻态；缺这两串说明仍会「完全不可见」。
+    grep -aqF 'hud.ack.json' "$HDYL" \
+        && ok "HUD dylib 为新编版（含 hud.ack.json）" \
+        || bad "HUD dylib 仍是旧二进制（无 ack，真机仍不可见）"
+    grep -aqF 'last_apply_at' "$HDYL" \
+        && ok "HUD dylib 含常驻状态诊断字段" || bad "HUD dylib 缺常驻状态诊断字段"
+    grep -aqF '/var/jb/Library/MobileSubstrate' "$HDYL" \
+        && ok "HUD install_name 为 rootless 路径" || bad "HUD install_name 未改 rootless"
+else bad "deb 缺 HUD dylib"; fi
+grep -qF 'HUDSTATE' "$D/dsh-extras-postinst.sh" \
+    && ok "postinst 把 HUD 状态目录属主设为 mobile" || bad "postinst 未处理 HUD 目录属主"
+
 sec "8) 两次构建字节级可复现"
 if [ -n "$ENGINE_ARG" ] && [ -n "$APPDIR_ARG" ]; then
     A=$(sha256sum "$DEB" | cut -d' ' -f1)

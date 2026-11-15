@@ -137,9 +137,53 @@ list_tools() {
     ' "$PORT"
 }
 
+# +ios24.8：HUD 可见性诊断。真机「HUD 完全不可见」最难的是判断到底卡在哪
+# 一层（dylib 没注入 / 没 respring / 文件读不到 / 桥没写事件 / 被其它插件盖住）。
+# 逐项列出证据，用户照着看一眼就能定位。
+hud_diag() {
+    DL="$JB/Library/MobileSubstrate/DynamicLibraries"
+    HUDJSON="/var/mobile/Library/DSH/hud.json"
+    ACK="/var/mobile/Library/DSH/hud.ack.json"
+    echo "=== HUD 实时进度诊断 ==="
+    if [ -f "$DL/dsh-ios-hud.dylib" ]; then
+        echo "dylib:   已安装 ($DL/dsh-ios-hud.dylib)"
+    else
+        echo "dylib:   缺失！本包不完整，重装 deb"
+    fi
+    if [ -f "$DL/dsh-ios-hud.plist" ]; then echo "plist:   已安装（Filter=SpringBoard）"; else echo "plist:   缺失"; fi
+    if [ -f "$ACK" ]; then
+        echo "注入:    已加载（HUD dylib 写回了 ack）:"
+        sed 's/^/         /' "$ACK" 2>/dev/null || true
+    else
+        echo "注入:    未确认（无 hud.ack.json）—— 多半是没 respring，或 ElleKit 未加载该 dylib"
+        echo "         → 先 respring 一次；仍无则看 jailbreak 日志里 dsh-ios-hud 的注入错误"
+    fi
+    if [ -f "$HUDJSON" ]; then
+        echo "状态文件: 存在 ($HUDJSON)"
+        echo "         $(head -c 300 "$HUDJSON" 2>/dev/null)"
+    else
+        echo "状态文件: 不存在 —— bridge 没写（服务没起 / 权限问题）"
+    fi
+    # 事件流健康：/progress?since=0 能返回、seq>0 就说明桥在推事件
+    if [ -x "$NODE_SAFE" ]; then
+        PR=$("$NODE_SAFE" -e '
+          const http=require("http");
+          const req=http.get({host:"127.0.0.1",port:Number(process.argv[1]),path:"/progress?since=0",timeout:1500},r=>{
+            let b="";r.on("data",c=>b+=c);r.on("end",()=>{try{const j=JSON.parse(b);console.log("seq="+j.seq+" events="+j.events.length+" sse="+j.sse_subscribers+" state="+(j.snapshot&&j.snapshot.state))}catch(_){console.log("解析失败")}});
+          });
+          req.on("error",()=>console.log("不可连"));
+          req.on("timeout",()=>{req.destroy();console.log("超时")});
+        ' "$PORT" 2>/dev/null)
+        echo "事件流:  $PR"
+    fi
+    echo "提示:    进度主通道在 DSH 界面右下角的常驻面板（不依赖本 HUD）；"
+    echo "         本 HUD 只是切到别的 App 时的跨 App 兜底。若面板也不动，跑 status / config-status。"
+}
+
 case "${1:-status}" in
     health)
         health && exit 0 || { echo "bridge 127.0.0.1:$PORT/health 不可连"; exit 1; } ;;
+    hud) hud_diag ;;
     status)
         echo "=== dsh-phone-bridge 状态 ==="
         P=$(bridge_pid 2>/dev/null || true)
@@ -167,5 +211,5 @@ case "${1:-status}" in
             [ -f "$f" ] && { echo "--- $f ---"; tail -40 "$f"; }
         done ;;
     tools)   list_tools ;;
-    *) echo "用法: dsh-phone-bridge-ctl status|health|native|native-on|native-off|enable|disable|config-on|config-off|config-status|log|tools" >&2; exit 64 ;;
+    *) echo "用法: dsh-phone-bridge-ctl status|health|hud|native|native-on|native-off|enable|disable|config-on|config-off|config-status|log|tools" >&2; exit 64 ;;
 esac

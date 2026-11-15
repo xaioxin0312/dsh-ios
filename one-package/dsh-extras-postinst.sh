@@ -172,8 +172,24 @@ for U in "$JB/usr/bin/uicache" "$JB/bin/uicache" /usr/bin/uicache; do
     if [ -x "$U" ]; then "$U" -a >/dev/null 2>&1 || true; break; fi
 done
 
+# --- 5) +ios24.8：给 HUD 状态目录正确的属主 -------------------------------
+# server.cjs 的 writeHud() 会 mkdir -p /var/mobile/Library/DSH，但 bridge
+# daemon 以 root 启动时该目录属主是 0:0 / mode 755，SpringBoard 里的 HUD
+# dylib 以 mobile(501) 身份写不进 hud.ack.json —— 表现为「HUD 完全不可见，
+# 连诊断依据都没有」。这里把目录属主固定给 mobile，并删掉旧 ack，让新 dylib
+# respring 后首次加载重新写回。此目录只放本包运行时状态（hud.json /
+# hud.ack.json），不是 $DSH_HOME，绝不触碰用户对话 / 工作区 / 插件。
+HUDSTATE="${DSH_HUD_STATE_DIR:-/var/mobile/Library/DSH}"
+mkdir -p "$HUDSTATE" 2>/dev/null || true
+chown 501:501 "$HUDSTATE" 2>/dev/null || true
+chmod 755 "$HUDSTATE" 2>/dev/null || true
+rm -f "$HUDSTATE/hud.ack.json" 2>/dev/null || true
+
 echo "DeepSeek Harness 单包：DSH 0.2.2-rc.3 + 全屏 Web Clip 入口 已就绪。"
 echo "  桌面点「DeepSeek Harness」图标即全屏使用；工作区 / 会话 / 插件全部保留。"
+echo "  +ios24.8：实时进度主通道在 DSH 页面右下角常驻卡片（无需 respring，装完即可见）。"
+echo "  SpringBoard 灵动岛胶囊为辅助显示，需 respring 一次让 HUD 注入生效；"
+echo "  两者都看不到时终端跑 dsh-phone-bridge-ctl hud 做完整诊断。"
 echo "  +ios24.7：开机自启已加用户会话兜底；异常时终端跑 dsh-autostart status 诊断。"
 echo "  若桌面仍是旧图标或仍显示 401，请 respring 一次（SpringBoard 会缓存旧 Web Clip）。"
 exit 0
