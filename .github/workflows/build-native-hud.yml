@@ -9,7 +9,7 @@ on:
 
 jobs:
   hud:
-    runs-on: macos-14
+    runs-on: macos-15 # arm64 (M1)；macos-14 标签已下线（2026-11 实测不可用）
     steps:
       - uses: actions/checkout@v4
       - name: Build dsh-ios-hud.dylib
