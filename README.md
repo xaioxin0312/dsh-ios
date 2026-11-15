@@ -8,14 +8,59 @@
 > 关于 Node 24.9：**（rc.1 时代的历史结论）** 当时公开可得的 iOS arm64 Node 可执行文件确实不存在（详见 [`docs/DSH-NODE-UPGRADE-EVALUATION.md`](docs/DSH-NODE-UPGRADE-EVALUATION.md)），但实证发现官方 `0.2.2-rc.1` 的四处 Node 22.12 兼容补丁锚点与 `0.2.1-rc.5` **逐字一致**，因此用同一套补丁 + 同一个已验证的 Node 22.12.0，做出了经 31 项核验（含真 boot、会话创建与恢复）的完整升级包。
 >
 > **⚠️ 2026-11-14 更正**：上面「不存在」的结论已被本仓库自己的 CI 推翻 —— GitHub Actions run `43532556241` 成功编译出 **Node v24.19.0 iOS arm64 独立 CLI**（artifact `14095226518` / Release `node24-exp`，SHA `8bebb2a2…`）。且 rc.3 的 `engines.node >= 24.9.0` **不是 advisory**（`bin.js` 用 `import.meta.main`）。故 rc.3 单包已改用该成品。首版 `+ios24` 在 A11 真机上暴露运行时不兼容，
-**当前推荐档位是 `+ios24.6` 正式版**（图片支持 + 老对话 transport 修复 + 内置手机操控），
-详见下方「正式版 +ios24.6」章节与 `one-package/README.md`。
+**当前推荐档位是 `+ios24.7` 正式版**（操控提速 + 灵动岛实时进度 + 自启兜底），
+详见下方「正式版 +ios24.7」章节与 `one-package/README.md`。
 
 ---
 
-## 正式版 · `+ios24.6`（2026-11-15，图片支持 + 内置手机操控）
+## 正式版 · `+ios24.7`（2026-11-15，操控提速 + 灵动岛实时进度 + 自启兜底）
 
 > 当前推荐安装的正式版。Release 附件：
+> `dev.airdevs.dsh_0.2.2-rc.3+ios24.7_iphoneos-arm64.deb`
+> （SHA-256 `2e16d17172e611d07235451b53d730cad5a4ce558cc28a0395efc1f4d3bd04b8`）。
+> 适用 iPhone X (A11, arm64) / iOS 15–16.7.x / Dopamine rootless (`/var/jb`)。
+
+### 操控提速（对标 DSH GO 的连续操作）
+
+| 改动 | 说明 |
+| --- | --- |
+| `phone_act` | 一次 MCP 调用执行整串 UI 动作（点按元素/坐标、输入、滑动、按键、回主屏、打开 App、等待、OCR），随后等 UI 树连续两次一致再返回精简后的可点元素；原来 5~10 次模型往返压成 1 次 |
+| `watch_screen` | 1~6fps 连续截图 + 帧差检测 + 关键帧 + Vision OCR，一次调用返回「第几秒画面发生变化」的事件时间线，用于看视频/动画/加载进度 |
+| `wait_for_change` | 点按后等到画面真的变化再返回，取代固定 sleep |
+| 工具清单缓存 | `tools/call` 不再每次强制 `initialize + tools/list`（旧实现每次多 3 个本地回环），30s 缓存未命中才刷新 |
+
+### 灵动岛实时进度
+
+新增 `dsh-ios-hud.dylib` 注入 SpringBoard：屏幕顶部胶囊显示当前动作、
+第 n/N 步、实时耗时与进度线，完成/失败短暂停留后淡出。HUD 只读
+`/var/mobile/Library/DSH/hud.json`（bridge 原子写入），不注册 MCP、
+不开端口、不拦截触摸；未加载时操控链路完全不受影响。
+
+### 自启兜底（不再需要开终端敲 `dsh`）
+
+新增 `dev.airdevs.dsh.agent`（LaunchAgent，用户会话）与 `dsh-autostart`：
+部分 rootless 环境开机不扫描 `/var/jb/Library/LaunchDaemons`，现在
+SpringBoard 启动时若 3080 未就绪会自动拉起 daemon，已就绪则静默退出。
+
+```sh
+dsh-autostart status    # 两级 launchd / 端口 / 三份日志
+dsh-autostart repair    # 重新 bootstrap 系统域 + 用户域
+```
+
+### 安装
+
+```sh
+dpkg -i dev.airdevs.dsh_0.2.2-rc.3+ios24.7_iphoneos-arm64.deb
+respring   # 让原生触控层与 HUD 注入 SpringBoard
+```
+
+`+ios24.6` 的图片支持 / 老对话 TRANSPORT 修复与全部历史修复均保留。
+
+---
+
+## 上一版 · `+ios24.6`（2026-11-15，图片支持 + 内置手机操控）
+
+> 历史交付（已被 `+ios24.7` 取代）。Release 附件：
 > `dev.airdevs.dsh_0.2.2-rc.3+ios24.6_iphoneos-arm64.deb`。
 > 适用 iPhone X (A11, arm64) / iOS 15–16.7.x / Dopamine rootless (`/var/jb`)。
 

@@ -4,7 +4,7 @@
 「最新 DSH + 像官方 App 一样点图标即用」的主交付。稳定底座
 （`build.sh` 产出的 `0.2.1-rc.5+ios15` / `0.2.2-rc.1+ios16`）一个字节都没动。
 
-## 档位：请装 `+ios24.6`
+## 档位：请装 `+ios24.7`
 
 | 档位 | 内置 Node | DSH | 状态 |
 | --- | --- | --- | --- |
@@ -15,7 +15,8 @@
 | `+ios24.3` | v24.19.0 + 核心包隔离 | 0.2.2-rc.3 | **已被取代**：修目录选择器/工作区 |
 | `+ios24.4` | v24.19.0 + corrupt 会话恢复 | 0.2.2-rc.3 | **已被取代**：修 `.corrupt-<ts>` 备份目录 |
 | `+ios24.5` | v24.19.0 + 免终端自启 | 0.2.2-rc.3 | **已被取代**：launchd 直接执行 dsh-daemon |
-| `+ios24.6` | **v24.19.0** + 图片支持 + 手机操控 | 0.2.2-rc.3 | **推荐**：修老对话 TRANSPORT（sharp 缺失）、图片上传、内置 ios-mcp + phone-bridge |
+| `+ios24.6` | v24.19.0 + 图片支持 + 手机操控 | 0.2.2-rc.3 | **已被取代**：修老对话 TRANSPORT（sharp 缺失）、图片上传、内置 ios-mcp + phone-bridge |
+| `+ios24.7` | v24.19.0 + 操控提速 + HUD + 自启兜底 | 0.2.2-rc.3 | **推荐**：`phone_act` / `watch_screen` / `wait_for_change`、SpringBoard 实时进度胶囊、LaunchAgent 兜底 |
 
 **为什么 `+ios18` 是坏的**：rc.3 的 `package.json` 声明 `engines.node >= 24.9.0`，
 且 `lib/bin.js` 用了 `import.meta.main`（Node 24.2+ 才支持）。22.12.0 上

@@ -2,7 +2,63 @@
 
 让「启动 DSH，DSH 就能直接调用工具操作手机」成立。**+ios24.6 起随主
 deb（`dev.airdevs.dsh`）一起安装**：原生层、bridge、launchd 自启、MCP
-注册全部开箱即用；不再依赖单独的 app 包或手动装 ios-mcp。
+注册全部开箱即用；不再依赖单独的 app 包或手动装 ios-mcp。**+ios24.7**
+起再加组合动作 / 看屏 / 实时进度 HUD 与用户会话自启兜底。
+
+## +ios24.7：操控提速、实时进度与自启兜底
+
+### 三个减少模型往返的工具
+
+| 工具 | 作用 |
+| --- | --- |
+| `phone_act` | 一次调用执行整串 UI 动作（`tap` 文本/坐标、`type`、`swipe`、`key`、`home`、`open`、`wait`、`ocr`），全部跑完后等 UI 树连续两次一致（`settle_ms`，默认 2500ms），返回精简后的可点元素；`screenshot:true` 可附带最终截图。原来 5~10 次模型往返压成 1 次 |
+| `watch_screen` | `fps` 1~6、`duration_ms` 500~8000 连续截图，按 JPEG 字节哈希做帧差，保留关键帧（`max_keyframes`，默认 3），`ocr`（默认开）对变化帧跑 Vision OCR，返回事件时间线；用于看视频/动画/加载进度，模型拿到的是「第几秒发生了变化」而不是 30fps 帧 |
+| `wait_for_change` | 点按后轮询到画面真的变化（`min_bytes` 阈值）或超时，取代固定 `sleep` |
+
+```text
+phone_act(steps=[{action:"tap",text:"搜索"},{action:"type",text:"天气"},{action:"tap",text:"搜索"}],
+          observe=true, screenshot=false)
+watch_screen(fps=3, duration_ms=3000, max_keyframes=3, ocr=true)
+wait_for_change(timeout_ms=5000, poll_ms=120)
+```
+
+同时修掉一个真实延迟源：旧实现每次 `tools/call` 前都强制
+`initialize + tools/list`（每次多 3 个本地回环）。现在工具清单 30s 缓存，
+未命中才刷新；mock 端到端测试里整个流程 `initialize` / `tools/list` 各只 1 次。
+
+### 灵动岛实时进度（`dsh-ios-hud.dylib`）
+
+SpringBoard 注入的悬浮胶囊，读 `/var/mobile/Library/DSH/hud.json`
+（bridge 用「写临时文件 + rename」原子更新，不依赖 IPC）：
+
+- 显示当前工具名/动作、第 `n/N` 步、实时耗时与底部进度线；
+  完成/失败短暂停留（`ttl_ms` 1.6s）后淡出，运行中超时 30s 自动隐藏；
+- 胶囊贴在屏幕顶部安全区下方（刘海/灵动岛下缘 `+6pt`），宽度 196~310pt；
+- `windowLevel=2000`、`userInteractionEnabled=NO`、`hitTest` 返回 `nil`，
+  不拦截触摸，也不注册 MCP、不开端口；
+- HUD 未加载 / `hud.json` 不可写时，`hudPublish()` 静默失败，
+  操控链路完全不受影响。
+
+HUD 由 GitHub Actions `macos-15` 编译（`.github/workflows/build-native-hud.yml`），
+`native/hud/build-hud.sh` 是等价的本地命令。
+
+### 自启兜底（`dsh-autostart`）
+
+部分 rootless 环境开机不扫描 `/var/jb/Library/LaunchDaemons`，旧版表现就是
+「必须开终端敲 `dsh`」。现在两级兜底：
+
+1. 系统域 `dev.airdevs.dsh`（LaunchDaemon，已有）；
+2. 用户域 `dev.airdevs.dsh.agent`（LaunchAgent，`LimitLoadToSessionType=Aqua`）：
+   SpringBoard 启动时执行 `dsh-autostart-agent`，3080 已就绪直接 `exit 0`，
+   未就绪才拉起 daemon；`KeepAlive{SuccessfulExit=false}` + `ThrottleInterval=15`。
+
+```sh
+dsh-autostart status   # 两级 launchd 状态、3080 探活、三份日志尾部
+dsh-autostart repair   # bootout + bootstrap 系统域，再 bootstrap gui/501，最多等 20s
+dsh-autostart logs     # 直接看 autostart / agent 日志
+```
+
+安装时 `dsh-extras-postinst.sh` 会自动跑一次 `dsh-autostart repair`（失败不阻塞安装）。
 
 ## 对标 Android DSH GO 的「手机 Agent」
 
@@ -33,12 +89,16 @@ bridge 再把它们与本机 A 层工具合并到 `127.0.0.1:8091/mcp`。
 |---|---|---|
 | `native/prebuilt/dsh-ios-control.dylib` | `/var/jb/Library/MobileSubstrate/DynamicLibraries/` | SpringBoard 原生层：AX 树 / 点按 / 滑动 / 输入 / 截图 / OCR |
 | `native/dsh-ios-control.plist` | 同目录 | MobileSubstrate filter（`com.apple.springboard`） |
+| `native/hud/dsh-ios-hud.dylib` | 同目录 | +ios24.7 实时进度胶囊：读 `hud.json`，在屏幕顶部显示动作/步骤/耗时 |
+| `native/hud/dsh-ios-hud.plist` | 同目录 | HUD 的 MobileSubstrate filter |
 | `native/prebuilt/mcp-logreader` | `/var/jb/usr/bin/` | 原生层读取 unified log 的小工具 |
 | `server.cjs` | `/var/jb/usr/lib/dsh-phone-bridge/` | 纯 Node MCP Streamable HTTP 服务，`127.0.0.1:8091/mcp` |
 | `ensure-config.cjs` | 同目录 | 幂等把 `@deepseek-ai/dsh-mcp-client` 注册进 `$DSH_HOME` 的 patch 层 |
 | `dsh-phone-bridge-daemon` | `/var/jb/usr/bin/` | launchd 前台入口：exec 进 server（node-safe 零 JIT） |
 | `dsh-phone-bridge-ctl` | `/var/jb/usr/bin/` | `status\|health\|native\|native-on\|native-off\|tools\|enable\|disable\|config-on\|config-off\|config-status\|log` |
 | `dev.airdevs.dsh.phone-bridge.plist` | `/var/jb/Library/LaunchDaemons/` | `RunAtLoad + KeepAlive`，`UserName=mobile` |
+| `dsh-autostart` | `/var/jb/usr/bin/` | +ios24.7 `status\|repair\|logs`：两级 launchd / 端口 / 日志诊断 |
+| `dsh-autostart-agent` + `dev.airdevs.dsh.agent.plist` | `/var/jb/usr/bin/` + `/var/jb/Library/LaunchAgents/` | 用户会话兜底：SpringBoard 启动时 3080 未就绪才拉起 daemon |
 | `verify-phone-bridge.sh` | 仅仓库 | 本地 28 项验证（真 MCP 握手 / 工具调用 / 上游转发 / 配置 schema / 零 JIT） |
 
 MCP 注册不在 daemon 里做（避免改写用户配置的嫌疑），而由

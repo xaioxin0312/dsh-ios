@@ -214,6 +214,15 @@ bce5bf18cf3417110b47fa651001331a8cf87ebe7d9a23c5db73b6baaee7497d  dev.airdevs.ds
 #   dylib 为 Mach-O 64-bit arm64。
 9cb3919870a0c5bd0ad8fa0bee3a5bb28061a6dab4e39aafa3e69358f2c320fa  dev.airdevs.dsh_0.2.2-rc.3+ios24.6_iphoneos-arm64.deb
 
+# +ios24.7（2026-11-15）：以 +ios24.6 deb 为基线 overlay（server.cjs /
+#   dsh-ios-hud.dylib + hud.plist / dsh-autostart + dsh-autostart-agent /
+#   dev.airdevs.dsh.agent.plist / dsh-extras-postinst.sh / phone-bridge README），
+#   control 追加 ios24.7 描述；chown 0:0、touch @1700000000、dpkg-deb -Zgzip -z9。
+# 核验：dpkg-deb -f / -c 通过；解包后 sh -n ×3、node --check server.cjs；
+#   HUD dylib magic cffaedfe（Mach-O 64-bit arm64）；plist 含 com.apple.springboard；
+#   与 +ios24.6 文件清单 diff 仅上述 7 项新增/变更。
+2e16d17172e611d07235451b53d730cad5a4ce558cc28a0395efc1f4d3bd04b8  dev.airdevs.dsh_0.2.2-rc.3+ios24.7_iphoneos-arm64.deb
+
 # --- 可选生态插件（手动安装，不预装）---
 f9f74e0f485148acfe544b88e35c17da196b6ff4c6da4f7a6576a7c566cd068a  dsh-ios-phone-control-0.1.0.tgz
 
