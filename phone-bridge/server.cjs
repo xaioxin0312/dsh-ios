@@ -44,35 +44,119 @@ const MAX_OUTPUT = 64 * 1024;
 const MAX_FILE = 2 * 1024 * 1024;
 const CMD_TIMEOUT = Number(process.env.DSH_BRIDGE_CMD_TIMEOUT || 60000);
 
-/* ------------------------------------------------- 实时进度（灵动岛悬浮胶囊）
- * 原生层 dsh-ios-hud.dylib 注入 SpringBoard，200ms 轮询这个文件并把状态画到
- * 屏幕顶部。bridge 只用「写临时文件 + rename」的原子写法，不依赖任何 IPC，
- * 因此 HUD 没装/没加载时调用链完全不受影响。
+/* ------------------------------------------------------- 实时进度事件总线
+ * +ios24.8：把「实时进度」从「只有一个 SpringBoard 悬浮胶囊」升级为
+ * 一条带序号、可续传、多订阅者的事件流。对标 DSH Go 的流式事件状态机：
+ *   - 引擎侧每个动作都产生结构化事件（state/tool/action/step/total/耗时）；
+ *   - 有界环形缓冲 + 单调递增 seq，断线后用 Last-Event-ID / ?since= 续传；
+ *   - SSE 为主通道（DSH Web UI 内嵌进度面板订阅），轮询为兜底；
+ *   - 同时保留 hud.json 原子写，供原生 SpringBoard 胶囊读取（向后兼容），
+ *     并**在空闲时也持续发心跳**，让 HUD 一装上就常驻可见，而不是收不到
+ *     事件就永远 alpha=0（这正是真机「HUD 完全不可见」的表象）。
+ *
+ * 设计要点：HUD 没装/没注入/被灵动岛插件盖住时，操控链路完全不受影响；
+ * Web UI 面板是主通道，原生 HUD 只是跨 App 兜底。
  */
 const HUD_PATH = process.env.DSH_HUD_PATH || '/var/mobile/Library/DSH/hud.json';
+const EVENT_CAP = 240;
+const SSE_PING_MS = 15000;
+const HUD_HEARTBEAT_MS = 2000;
+let eventSeq = 0;
 let hudStart = 0;
-function hudPublish(state, detail, extra) {
-    const e = extra || {};
-    if (state === 'running' && !hudStart) hudStart = Date.now();
-    const obj = {
-        v: 1,
-        state,
-        title: e.title || 'DSH 操控中',
-        detail: String(detail || '').slice(0, 90),
-        step: Number(e.step || 0),
-        total: Number(e.total || 0),
-        elapsed_ms: hudStart ? Date.now() - hudStart : 0,
-        ts: Date.now(),
-        ttl_ms: Number(e.ttl || (state === 'running' ? 30000 : 1600))
-    };
-    if (state !== 'running') hudStart = 0;
+let runSeq = 0;
+const eventRing = [];
+const sseClients = new Set();
+let snapshot = {
+    seq: 0, ts: Date.now(), state: 'idle', title: 'DSH 就绪',
+    detail: '等待任务', tool: '', action: '', step: 0, total: 0,
+    elapsed_ms: 0, ok: null, run_id: '', ttl_ms: 0
+};
+let idleSince = Date.now();
+
+function hudCompatibleState(state) {
+    // 原生 HUD 只认 running / error / 其它；把细分状态折叠过去。
+    if (state === 'error' || state === 'failed') return 'error';
+    if (state === 'done' || state === 'idle' || state === 'ready') return state;
+    return 'running';
+}
+
+function writeHud(obj) {
     try {
         fs.mkdirSync(path.dirname(HUD_PATH), { recursive: true });
         const tmp = HUD_PATH + '.tmp';
         fs.writeFileSync(tmp, JSON.stringify(obj));
         fs.renameSync(tmp, HUD_PATH);
-    } catch (_) { /* HUD 不可用时静默 */ }
+    } catch (_) { /* HUD 不可用时静默，不影响操控链路 */ }
 }
+
+function emitEvent(state, detail, extra) {
+    const e = extra || {};
+    const now = Date.now();
+    const st = String(state || 'running');
+    if (st === 'running' && !hudStart) { hudStart = now; runSeq += 1; }
+    if (st === 'done' || st === 'error' || st === 'failed' || st === 'idle') hudStart = 0;
+    if (st === 'idle') idleSince = now;
+
+    snapshot = {
+        seq: ++eventSeq,
+        ts: now,
+        state: st,
+        title: e.title || (st === 'idle' ? 'DSH 就绪' : 'DSH 操控中'),
+        detail: String(detail === undefined ? '' : detail).slice(0, 160),
+        tool: String(e.tool || ''),
+        action: String(e.action || ''),
+        step: Number(e.step || 0),
+        total: Number(e.total || 0),
+        elapsed_ms: hudStart ? now - hudStart : 0,
+        ok: e.ok === undefined ? null : !!e.ok,
+        run_id: e.run_id || ('r' + (runSeq || 1)),
+        ttl_ms: Number(e.ttl || (st === 'running' ? 30000 : 1600))
+    };
+    eventRing.push(snapshot);
+    if (eventRing.length > EVENT_CAP) eventRing.shift();
+
+    // 原生 HUD：保持旧字段结构 + 常驻态（idle 也写，且 ttl 极长）
+    writeHud({
+        v: 2,
+        state: hudCompatibleState(st),
+        title: snapshot.title,
+        detail: snapshot.detail.slice(0, 90),
+        step: snapshot.step,
+        total: snapshot.total,
+        elapsed_ms: snapshot.elapsed_ms,
+        ts: snapshot.ts,
+        ttl_ms: st === 'idle' ? 86400000 : snapshot.ttl_ms
+    });
+
+    // SSE 广播
+    const frame = 'id: ' + snapshot.seq + '\nevent: ' + st + '\ndata: ' + JSON.stringify(snapshot) + '\n\n';
+    for (const c of sseClients) {
+        try { c.write(frame); } catch (_) { sseClients.delete(c); }
+    }
+    return snapshot;
+}
+
+/* 兼容旧调用点：所有 hudPublish(state, detail, extra) 原样保留。 */
+function hudPublish(state, detail, extra) {
+    return emitEvent(state, detail, extra);
+}
+
+/* 空闲心跳：让 hud.json 的 mtime 持续变化，原生 HUD 保持常驻可见；
+ * 同时给 SSE 客户端发 ping，防止 iOS Safari 把长连接判死。
+ * 心跳不写入事件环（避免刷屏），只刷新文件与当前快照时间。
+ */
+setInterval(() => {
+    if (snapshot.state === 'idle' || snapshot.state === 'ready') {
+        writeHud({
+            v: 2, state: 'running', title: 'DSH 就绪', detail: '等待任务 · 桥已连接',
+            step: 0, total: 0, elapsed_ms: Date.now() - idleSince,
+            ts: Date.now(), ttl_ms: 86400000
+        });
+    }
+    for (const c of sseClients) {
+        try { c.write(': ping\n\n'); } catch (_) { sseClients.delete(c); }
+    }
+}, HUD_HEARTBEAT_MS).unref();
 
 function tool(name, description, properties, required) {
     return {
@@ -100,33 +184,40 @@ const LOCAL_TOOLS = [
     tool('dsh_status', 'Report whether the DSH web service / daemon / this bridge are reachable.', { port: N('DSH web port, default 3080') }),
     tool('phone_bridge_status', 'Report this bridge: local tool count, upstream ios-mcp reachability and merged tool count.', {}),
     tool('phone_act',
-        'Run a batch of UI actions in ONE call, then wait for the screen to settle and return the resulting UI. ' +
-        'Use this instead of many single-step tool calls: fewer model round trips, and progress streams to the Dynamic Island HUD. ' +
-        'Steps run in order: tap (text or x/y), type, swipe, key, home, open, wait, ocr.',
+        'Run a batch of UI actions in ONE call (fewest model round trips), with live streamed progress, ' +
+        'then wait for the screen to settle and return COMPACT, incremental UI text. ' +
+        'Whole step list is pre-validated before any tap is sent. ' +
+        'Actions: tap, type, swipe, key, home, open, wait, ocr, find, wait_text, assert, screenshot. ' +
+        'Prefer find + tap(x,y) / wait_text / assert to avoid extra screenshot round trips.',
         {
             steps: {
                 type: 'array',
-                description: 'ordered actions, e.g. [{"action":"tap","text":"发送"},{"action":"type","text":"hello"}]',
+                description: 'ordered actions, e.g. [{"action":"find","text":"发送"},{"action":"tap","text":"发送"},{"action":"wait_text","text":"已发送"}]',
                 items: {
                     type: 'object',
                     properties: {
-                        action: S('tap | type | swipe | key | home | open | wait | ocr'),
-                        text: S('tap: element text to tap; type: text to type'),
+                        action: S('tap | type | swipe | key | home | open | wait | ocr | find | wait_text | assert | screenshot'),
+                        text: S('tap/find/wait_text/assert: element or screen text; type: text to type'),
                         x: N('tap: x point'), y: N('tap: y point'),
                         from_x: N('swipe start x'), from_y: N('swipe start y'),
                         to_x: N('swipe end x'), to_y: N('swipe end y'),
                         duration_ms: N('swipe duration'),
                         key: S('key name for key action, e.g. return/backspace'),
                         bundle_id: S('open: bundle id or URL'),
-                        ms: N('wait: milliseconds')
+                        ms: N('wait: milliseconds / wait_text: timeout ms'),
+                        disappear: B('wait_text/assert: wait for text to disappear'),
+                        limit: N('find: max matches')
                     },
                     required: ['action']
                 }
             },
-            observe: B('return compact UI elements after the screen settles (default true)'),
+            observe: B('return compact UI after the screen settles (default true)'),
+            compact: B('return only changed UI lines (incremental), default true'),
+            full_ui: B('also return the full raw UI tree for debugging, default false'),
             screenshot: B('also return a final screenshot (default false)'),
             settle_ms: N('screen settle timeout in ms, default 2500'),
-            clickable_only: B('only clickable elements in the returned UI, default true')
+            clickable_only: B('only clickable elements in the returned UI, default true'),
+            stop_on_error: B('stop the whole batch on first failed step, default true')
         }, ['steps']),
     tool('watch_screen',
         'Watch the screen for a short window without model round trips: capture frames at 1-6 fps, detect scene changes, ' +
@@ -145,7 +236,34 @@ const LOCAL_TOOLS = [
             timeout_ms: N('max wait, default 5000'),
             poll_ms: N('poll interval, default 120'),
             min_bytes: N('minimum JPEG byte delta to count as change, default 200')
-        }, [])
+        }, []),
+    /* +ios24.8 效率工具：对标 DSH Go / dsh-ios-connect 的 phone_find / phone_wait。
+     * 一次模型往返里把「找元素 / 等文本 / 断言」都在设备端闭环，避免
+     * 「截图 -> 模型认坐标 -> 再点 -> 再截图复核」这种最贵的循环。 */
+    tool('find_element',
+        'Find UI elements by text/label in ONE call and return compact, directly-tappable points. ' +
+        'Avoids a full screenshot + model-side coordinate guessing round trip. ' +
+        'Returns plain-text lines "[i] text @ (x,y)" so even a text-only model can use it.',
+        {
+            text: S('text/label to match (substring, case-insensitive)'),
+            exact: B('exact match instead of substring'),
+            limit: N('max matches, default 12'),
+            clickable_only: B('only clickable elements, default false (match all)')
+        }, ['text']),
+    tool('wait_for_text',
+        'Wait on-device until a text appears (or disappears) on screen, then return compact UI. ' +
+        'Replaces the "act -> screenshot -> model checks -> act again" loop with one tool call.',
+        {
+            text: S('text to wait for'),
+            disappear: B('wait until text disappears instead of appears'),
+            timeout_ms: N('max wait, default 6000'),
+            poll_ms: N('poll interval, default 200'),
+            ocr: B('also use OCR text when AX tree misses, default false')
+        }, ['text']),
+    tool('progress_status',
+        'Report the live progress channel: current event snapshot, seq, SSE subscriber count, ' +
+        'event buffer size and the exact endpoints the DSH Web UI progress panel uses.',
+        {})
 ];
 
 /* B 层工具名（上游在线时动态合并，离线时作为「需要 ios-mcp」的提示清单） */
@@ -333,37 +451,92 @@ async function settle(ms, clickableOnly) {
     return uiOf(r);
 }
 
+const VALID_ACTIONS = new Set(['tap', 'type', 'swipe', 'key', 'home', 'open', 'wait', 'ocr', 'find', 'wait_text', 'assert', 'screenshot']);
+
+/* 批量执行前先整张清单校验（dsh-ios-connect phone_batch 的做法）：任一步
+ * 动作名写错 / 参数缺失，整批不执行，避免已发出的点击无法撤回。 */
+function validateSteps(steps) {
+    const problems = [];
+    for (let i = 0; i < steps.length; i++) {
+        const s = steps[i] || {};
+        const a = String(s.action || '').toLowerCase();
+        const where = 'steps[' + i + ']';
+        if (!VALID_ACTIONS.has(a)) { problems.push(where + ': unknown action "' + a + '"'); continue; }
+        if (a === 'tap' && !s.text && (s.x === undefined || s.y === undefined)) problems.push(where + ': tap needs text or x/y');
+        if (a === 'type' && s.text === undefined) problems.push(where + ': type needs text');
+        if (a === 'swipe' && [s.from_x, s.from_y, s.to_x, s.to_y].some((v) => v === undefined)) problems.push(where + ': swipe needs from_x/from_y/to_x/to_y');
+        if (a === 'open' && !s.bundle_id) problems.push(where + ': open needs bundle_id');
+        if (a === 'find' && !s.text) problems.push(where + ': find needs text');
+        if (a === 'wait_text' && !s.text) problems.push(where + ': wait_text needs text');
+        if (a === 'assert' && !s.text) problems.push(where + ': assert needs text');
+    }
+    return problems;
+}
+
 async function phoneAct(a) {
     const steps = Array.isArray(a.steps) ? a.steps.slice(0, 40) : [];
     if (!steps.length) return err('steps must be a non-empty array');
+    const problems = validateSteps(steps);
+    if (problems.length) {
+        hudPublish('error', '批量步骤校验失败：' + problems.length + ' 处', { tool: 'phone_act', ok: false });
+        return textResult({ ok: false, rejected: true, reason: 'pre-validation failed, no step executed', problems,
+            valid_actions: Array.from(VALID_ACTIONS) }, true);
+    }
     const total = steps.length;
     const out = [];
+    const t0 = Date.now();
+    const runId = 'act-' + t0;
+    hudPublish('running', `准备执行 ${total} 步`, { tool: 'phone_act', action: 'validate', step: 0, total, run_id: runId });
     for (let i = 0; i < total; i++) {
         const s = steps[i] || {};
-        hudPublish('running', `第 ${i + 1}/${total} 步：${STEP_LABEL[String(s.action || '').toLowerCase()] || s.action} ${stepText(s)}`.trim(),
-            { step: i + 1, total });
-        const r = await runStep(s);
+        const act = String(s.action || '').toLowerCase();
+        hudPublish('running', `第 ${i + 1}/${total} 步：${STEP_LABEL[act] || act} ${stepText(s)}`.trim(),
+            { tool: 'phone_act', action: act, step: i + 1, total, run_id: runId });
+        let r;
+        if (act === 'find') {
+            const f = await findElement({ text: s.text, limit: s.limit || 8, clickable_only: s.clickable_only !== false });
+            const j = JSON.parse(f.content[0].text);
+            r = { action: act, ok: j.found > 0, ms: j.elapsed_ms, found: j.found, matches: j.matches };
+        } else if (act === 'wait_text') {
+            const w = await waitForText({ text: s.text, disappear: !!s.disappear, timeout_ms: s.timeout_ms || s.ms || 6000 });
+            const j = JSON.parse(w.content[0].text);
+            r = { action: act, ok: !!j.matched, ms: j.elapsed_ms, matched: j.matched };
+        } else if (act === 'assert') {
+            const f = await findElement({ text: s.text, limit: 1 });
+            const j = JSON.parse(f.content[0].text);
+            r = { action: act, ok: s.disappear ? j.found === 0 : j.found > 0, ms: j.elapsed_ms, found: j.found };
+        } else if (act === 'screenshot') {
+            const sh = await shotHash();
+            r = { action: act, ok: !!sh, ms: 0, bytes: sh ? sh.bytes : 0 };
+        } else {
+            r = await runStep(s);
+        }
         out.push(r);
-        if (!r.ok) {
-            hudPublish('error', `第 ${i + 1} 步失败：${stepText(s) || s.action}`, { step: i + 1, total });
+        if (!r.ok && a.stop_on_error !== false) {
+            hudPublish('error', `第 ${i + 1} 步失败：${stepText(s) || act}`, { tool: 'phone_act', action: act, step: i + 1, total, ok: false, run_id: runId });
             return textResult({ ok: false, failed_at: i + 1, steps: out }, true);
         }
     }
-    hudPublish('running', '等待界面稳定…', { step: total, total });
+    hudPublish('running', '等待界面稳定…', { tool: 'phone_act', action: 'settle', step: total, total, run_id: runId });
     const observe = a.observe !== false;
     const ui = observe ? await settle(a.settle_ms, a.clickable_only !== false) : null;
-    const payload = { ok: true, steps: out, settled_ui: ui };
+    // +ios24.8：默认返回紧凑纯文本 + 增量 diff，不再把整棵 JSON 树塞给模型。
+    // a.full_ui=true 才回退到完整结构（兼容旧会话/调试）。
+    const compact = observe ? (a.compact === false ? compactUI(ui, { limit: 60 }) : uiDelta(ui, { limit: 60 })) : null;
+    const payload = { ok: true, steps: out, elapsed_ms: Date.now() - t0, ui: compact,
+        ui_lines: compact ? compact.lines : [], ui_unchanged: compact ? compact.changed === false : null };
+    if (a.full_ui) payload.settled_ui = ui;
     if (a.screenshot) {
         const sh = await shotHash();
         if (sh) {
-            hudPublish('done', `${total} 步完成 · ${sh.bytes}B 画面`, { step: total, total });
+            hudPublish('done', `${total} 步完成 · ${sh.bytes}B 画面`, { tool: 'phone_act', action: 'done', step: total, total, ok: true, run_id: runId });
             return {
                 content: [{ type: 'text', text: JSON.stringify(payload).slice(0, MAX_OUTPUT) },
                           { type: 'image', data: sh.shot.data, mimeType: sh.shot.mimeType }]
             };
         }
     }
-    hudPublish('done', `${total} 步完成`, { step: total, total });
+    hudPublish('done', `${total} 步完成 · ${Date.now() - t0}ms`, { tool: 'phone_act', action: 'done', step: total, total, ok: true, run_id: runId });
     return textResult(payload);
 }
 
@@ -442,6 +615,167 @@ async function waitForChange(a) {
     }
     hudPublish('done', '未检测到变化', {});
     return textResult({ changed: false, elapsed_ms: Date.now() - t0, polls });
+}
+
+/* ------------------------------------------------- +ios24.8 效率：紧凑 UI 树
+ * 原生 get_ui_elements 返回的是一整棵嵌套 JSON（几十 KB），模型每读一次都
+ * 要吞掉整棵树。DSH Go 的做法是「控件树转纯文本，纯文本模型也能用」；
+ * dsh-ios-connect 则把「按文本找控件直接给坐标」「等文本出现」做成工具，
+ * 让这两步不再需要截图与模型往返。这里两者都实现，并且只回传变化量。
+ */
+function extractElements(ui) {
+    if (!ui) return [];
+    let list = [];
+    if (Array.isArray(ui)) list = ui;
+    else if (Array.isArray(ui.elements)) list = ui.elements;
+    else if (Array.isArray(ui.nodes)) list = ui.nodes;
+    else if (Array.isArray(ui.children)) list = ui.children;
+    else if (ui.structuredContent) return extractElements(ui.structuredContent);
+    const out = [];
+    const walk = (arr, depth) => {
+        if (!Array.isArray(arr) || depth > 8) return;
+        for (const e of arr) {
+            if (!e || typeof e !== 'object') continue;
+            out.push(e);
+            if (Array.isArray(e.children)) walk(e.children, depth + 1);
+            else if (Array.isArray(e.elements)) walk(e.elements, depth + 1);
+        }
+    };
+    walk(list, 0);
+    return out;
+}
+
+function elemText(e) {
+    for (const k of ['text', 'label', 'name', 'title', 'value', 'contentDescription', 'accessibilityLabel']) {
+        if (e[k] !== undefined && e[k] !== null && String(e[k]).trim()) return String(e[k]).trim();
+    }
+    return '';
+}
+
+function elemPoint(e) {
+    // 兼容 ios-mcp / WDA / AX 各家字段：center / x,y / frame / rect / bounds
+    let cx = null, cy = null;
+    for (const k of ['centerX', 'cx', 'center_x']) if (e[k] !== undefined) cx = Number(e[k]);
+    for (const k of ['centerY', 'cy', 'center_y']) if (e[k] !== undefined) cy = Number(e[k]);
+    if (cx === null && e.x !== undefined) cx = Number(e.x);
+    if (cy === null && e.y !== undefined) cy = Number(e.y);
+    const f = e.frame || e.rect || e.bounds;
+    if ((cx === null || cy === null) && f) {
+        let m;
+        if (typeof f === 'string') {
+            m = f.match(/\{\{?\s*([\d.]+)\s*,\s*([\d.]+)\s*\}\s*,\s*\{\{?\s*([\d.]+)\s*,\s*([\d.]+)/);
+            if (m) { cx = Number(m[1]) + Number(m[3]) / 2; cy = Number(m[2]) + Number(m[4]) / 2; }
+        } else if (typeof f === 'object') {
+            const fx = Number(f.x !== undefined ? f.x : f.origin && f.origin.x);
+            const fy = Number(f.y !== undefined ? f.y : f.origin && f.origin.y);
+            const fw = Number(f.width !== undefined ? f.width : f.size && f.size.width);
+            const fh = Number(f.height !== undefined ? f.height : f.size && f.size.height);
+            if (!Number.isNaN(fx) && !Number.isNaN(fy)) {
+                cx = fx + (Number.isNaN(fw) ? 0 : fw / 2);
+                cy = fy + (Number.isNaN(fh) ? 0 : fh / 2);
+            }
+        }
+    }
+    if (e.center && typeof e.center === 'object') {
+        if (cx === null && e.center.x !== undefined) cx = Number(e.center.x);
+        if (cy === null && e.center.y !== undefined) cy = Number(e.center.y);
+    }
+    return { x: cx, y: cy, ok: Number.isFinite(cx) && Number.isFinite(cy) };
+}
+
+function compactUI(ui, opts) {
+    const o = opts || {};
+    const limit = Math.min(Math.max(Number(o.limit) || 40, 1), 120);
+    const els = extractElements(ui);
+    const lines = [];
+    let i = 0;
+    for (const e of els) {
+        const t = elemText(e);
+        if (!t && !o.includeEmpty) continue;
+        if (o.clickable_only && e.clickable === false) continue;
+        const p = elemPoint(e);
+        const tag = e.type || e.role || e.className || '';
+        const pos = p.ok ? '@(' + Math.round(p.x) + ',' + Math.round(p.y) + ')' : '@(?)';
+        const click = e.clickable === true ? '*' : ' ';
+        lines.push('[' + i + ']' + click + ' ' + (t || tag || '·').slice(0, 48) + ' ' + pos);
+        i += 1;
+        if (lines.length >= limit) break;
+    }
+    return { count: els.length, shown: lines.length, lines };
+}
+
+let lastUIKey = '';
+function uiDelta(ui, opts) {
+    // 只回传相对上一次观察发生变化的行，减少 token 与传输（DSH Go 增量思路）。
+    const c = compactUI(ui, opts);
+    const key = crypto.createHash('sha1').update(c.lines.join('\n')).digest('hex');
+    const changed = key !== lastUIKey;
+    lastUIKey = key;
+    return { changed, total: c.count, lines: changed ? c.lines : [], note: changed ? undefined : 'UI unchanged since last observation' };
+}
+
+async function readUI(args) {
+    const r = await upstreamCall('get_ui_elements', {
+        clickable_only: !!(args && args.clickable_only),
+        limit: Math.min(Number(args && args.limit) || 80, 200)
+    });
+    return uiOf(r);
+}
+
+async function findElement(a) {
+    const needle = String(a.text || '').trim().toLowerCase();
+    if (!needle) return err('text is required');
+    const t0 = Date.now();
+    hudPublish('running', '查找「' + String(a.text).slice(0, 20) + '」', { tool: 'find_element' });
+    const ui = await readUI({ clickable_only: false, limit: 200 });
+    const els = extractElements(ui);
+    const limit = Math.min(Math.max(Number(a.limit) || 12, 1), 40);
+    const hits = [];
+    for (let i = 0; i < els.length && hits.length < limit; i++) {
+        const e = els[i];
+        if (a.clickable_only && e.clickable === false) continue;
+        const t = elemText(e);
+        if (!t) continue;
+        const hay = t.toLowerCase();
+        const match = a.exact ? hay === needle : hay.includes(needle);
+        if (!match) continue;
+        const p = elemPoint(e);
+        hits.push({ i, text: t.slice(0, 60), x: p.ok ? Math.round(p.x) : null, y: p.ok ? Math.round(p.y) : null, clickable: e.clickable !== false });
+    }
+    hudPublish('done', '找到 ' + hits.length + ' 个 · ' + (Date.now() - t0) + 'ms', { tool: 'find_element', ok: true, ttl: 1400 });
+    const lines = hits.map((h) => '[' + h.i + '] ' + h.text + ' @(' + h.x + ',' + h.y + ')');
+    return textResult({ found: hits.length, query: a.text, elapsed_ms: Date.now() - t0, matches: hits, lines,
+        hint: hits.length ? 'Pass {"action":"tap","x":..,"y":..} in phone_act, or use {"action":"tap","text":".."}.' : 'No match; try ocr_screen or broader text.' });
+}
+
+async function waitForText(a) {
+    const needle = String(a.text || '').trim().toLowerCase();
+    if (!needle) return err('text is required');
+    const timeout = Math.min(Math.max(Number(a.timeout_ms) || 6000, 300), 30000);
+    const poll = Math.min(Math.max(Number(a.poll_ms) || 200, 100), 1000);
+    const t0 = Date.now();
+    let polls = 0;
+    hudPublish('running', (a.disappear ? '等待「' : '等待出现「') + String(a.text).slice(0, 20) + (a.disappear ? '」消失' : '」'), { tool: 'wait_for_text' });
+    while (Date.now() - t0 < timeout) {
+        polls += 1;
+        let hay = '';
+        const ui = await readUI({ clickable_only: false, limit: 200 });
+        hay = extractElements(ui).map(elemText).join('\n').toLowerCase();
+        if (a.ocr && !hay.includes(needle)) {
+            const o = await nativeOk('ocr_screen', { engine: 'vision' });
+            if (o.ok) hay += '\n' + JSON.stringify(uiOf(o.result) || '').toLowerCase();
+        }
+        const present = hay.includes(needle);
+        if (a.disappear ? !present : present) {
+            const d = uiDelta(ui, { limit: 40 });
+            hudPublish('done', (a.disappear ? '已消失' : '已出现') + ' · ' + (Date.now() - t0) + 'ms', { tool: 'wait_for_text', ok: true, ttl: 1400 });
+            return textResult({ matched: true, mode: a.disappear ? 'disappear' : 'appear', text: a.text,
+                elapsed_ms: Date.now() - t0, polls, ui_delta: d });
+        }
+        await sleep(poll);
+    }
+    hudPublish('done', '等待超时（' + timeout + 'ms）', { tool: 'wait_for_text', ok: false, ttl: 1400 });
+    return textResult({ matched: false, text: a.text, elapsed_ms: Date.now() - t0, polls });
 }
 
 async function callLocal(name, args) {
@@ -567,6 +901,25 @@ async function callLocal(name, args) {
             return watchScreen(a);
         case 'wait_for_change':
             return waitForChange(a);
+        case 'find_element':
+            return findElement(a);
+        case 'wait_for_text':
+            return waitForText(a);
+        case 'progress_status': {
+            const up = await upstreamTools(false);
+            return textResult({
+                version: '2.0.0', channel: 'sse+polling', seq: eventSeq,
+                snapshot, events_buffered: eventRing.length, event_cap: EVENT_CAP,
+                sse_subscribers: sseClients.size,
+                endpoints: {
+                    sse: 'http://' + HOST + ':' + PORT + '/events',
+                    poll: 'http://' + HOST + ':' + PORT + '/progress?since=<seq>',
+                    hud_file: HUD_PATH
+                },
+                upstream_online: up.length > 0,
+                note: 'The DSH Web UI progress panel subscribes to /events; HUD reads hud.json.'
+            });
+        }
         default:
             return err('unknown local tool: ' + name);
     }
@@ -701,10 +1054,14 @@ async function dispatch(msg, res) {
             const localNames = new Set(LOCAL_TOOLS.map((t) => t.name));
             const t0 = Date.now();
             if (localNames.has(name)) {
+                // +ios24.8：每个工具调用都有「开始」事件，批量/看屏类工具内部
+                // 还会自己逐步推事件；这里只在结束时补一条汇总。
+                hudPublish('running', `调用 ${name}`, { tool: name, action: 'tool_start' });
                 const out = await callLocal(name, args);
                 if (name !== 'phone_act' && name !== 'watch_screen' && name !== 'wait_for_change') {
                     hudPublish(out && out.isError ? 'error' : 'done',
-                        `${name} · ${Date.now() - t0}ms`, { ttl: 1400 });
+                        `${name} · ${Date.now() - t0}ms`, { tool: name, action: 'tool_done',
+                        ok: !(out && out.isError), ttl: 1400 });
                 }
                 return reply(res, msg.id, out);
             }
@@ -713,9 +1070,10 @@ async function dispatch(msg, res) {
             let up = await upstreamTools(false);
             if (!up.some((t) => t.name === name)) up = await upstreamTools(true);
             if (up.some((t) => t.name === name)) {
-                hudPublish('running', `${name}`, {});
+                hudPublish('running', `调用 ${name}`, { tool: name, action: 'tool_start' });
                 const out = await upstreamCall(name, args);
-                hudPublish(out && out.isError ? 'error' : 'done', `${name} · ${Date.now() - t0}ms`, { ttl: 1400 });
+                hudPublish(out && out.isError ? 'error' : 'done', `${name} · ${Date.now() - t0}ms`,
+                    { tool: name, action: 'tool_done', ok: !(out && out.isError), ttl: 1400 });
                 return reply(res, msg.id, out);
             }
             if (UPSTREAM_HINT_TOOLS.includes(name)) {
@@ -741,19 +1099,71 @@ async function dispatch(msg, res) {
     }
 }
 
+function corsHeaders(extra) {
+    return Object.assign(commonHeaders(), {
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        'Cache-Control': 'no-cache, no-transform',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no'
+    }, extra || {});
+}
+
 const server = http.createServer((req, res) => {
-    if (req.method === 'GET' && (req.url === '/health' || req.url === '/')) {
-        res.writeHead(200, Object.assign(commonHeaders(), { 'Content-Type': 'application/json' }));
+    const url = String(req.url || '');
+    // ---- /health ----
+    if (req.method === 'GET' && (url === '/health' || url === '/' || url.startsWith('/health?'))) {
+        res.writeHead(200, corsHeaders({ 'Content-Type': 'application/json' }));
         res.end(JSON.stringify({
-            status: 'ok', server: 'dsh-ios-phone-bridge', version: '1.0.0',
+            status: 'ok', server: 'dsh-ios-phone-bridge', version: '2.0.0',
             protocolVersion: PROTOCOL, local_tools: LOCAL_TOOLS.length,
-            upstream: UPSTREAM, endpoint: 'http://' + HOST + ':' + PORT + '/mcp'
+            upstream: UPSTREAM, endpoint: 'http://' + HOST + ':' + PORT + '/mcp',
+            progress: { channel: 'sse', seq: eventSeq, sse_subscribers: sseClients.size,
+                sse: 'http://' + HOST + ':' + PORT + '/events',
+                poll: 'http://' + HOST + ':' + PORT + '/progress' },
+            hud_file: HUD_PATH
         }));
         return;
     }
-    if (req.method === 'OPTIONS') { res.writeHead(204, commonHeaders()); res.end(); return; }
-    if (req.method !== 'POST' || !String(req.url || '').startsWith('/mcp')) {
-        res.writeHead(404, commonHeaders()); res.end(); return;
+    // ---- /events : Server-Sent Events（DSH Web UI 进度面板主通道）----
+    // 断线续传：优先 Last-Event-ID 头，其次 ?since=；重连后先补发历史事件。
+    if (req.method === 'GET' && (url === '/events' || url.startsWith('/events?'))) {
+        let since = 0;
+        const m = url.match(/[?&]since=(\d+)/);
+        if (m) since = Number(m[1]);
+        const laid = req.headers['last-event-id'];
+        if (laid && Number(laid) > since) since = Number(laid);
+        res.writeHead(200, corsHeaders({
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Access-Control-Allow-Headers': 'Content-Type, Accept, MCP-Protocol-Version, Mcp-Session-Id, Last-Event-ID'
+        }));
+        res.write('retry: 1200\n\n');
+        // 先补发断线期间的历史事件（有界环形缓冲）
+        for (const e of eventRing) {
+            if (e.seq > since) res.write('id: ' + e.seq + '\nevent: ' + e.state + '\ndata: ' + JSON.stringify(e) + '\n\n');
+        }
+        // 没有历史时也要给一条当前快照，让面板立刻有内容、HUD 立刻可见
+        res.write('event: snapshot\ndata: ' + JSON.stringify(snapshot) + '\n\n');
+        sseClients.add(res);
+        const keepAlive = setInterval(() => {
+            try { res.write(': ping\n\n'); } catch (_) { /* 由 close 清理 */ }
+        }, SSE_PING_MS);
+        keepAlive.unref();
+        req.on('close', () => { clearInterval(keepAlive); sseClients.delete(res); });
+        return;
+    }
+    // ---- /progress : 轮询兜底（SSE 被 Web Clip / Safari 拦截时）----
+    if (req.method === 'GET' && (url === '/progress' || url.startsWith('/progress?'))) {
+        const m = url.match(/[?&]since=(\d+)/);
+        const since = m ? Number(m[1]) : 0;
+        const events = eventRing.filter((e) => e.seq > since).slice(-120);
+        res.writeHead(200, corsHeaders({ 'Content-Type': 'application/json' }));
+        res.end(JSON.stringify({ seq: eventSeq, now: Date.now(), snapshot, events,
+            sse_subscribers: sseClients.size, cap: EVENT_CAP }));
+        return;
+    }
+    if (req.method === 'OPTIONS') { res.writeHead(204, corsHeaders()); res.end(); return; }
+    if (req.method !== 'POST' || !url.startsWith('/mcp')) {
+        res.writeHead(404, corsHeaders()); res.end(); return;
     }
     let body = '';
     req.on('data', (c) => {
@@ -785,5 +1195,10 @@ server.on('error', (e) => {
 });
 
 server.listen(PORT, HOST, () => {
+    // +ios24.8：启动即发「就绪」事件并写 hud.json。旧实现要等第一次
+    // tools/call 才写文件，真机上 HUD 因此永远 alpha=0（完全不可见）。
+    // 现在桥一起来，原生 HUD 与 Web UI 面板都能立刻看到常驻状态。
+    emitEvent('idle', '桥已连接 · 等待任务', { title: 'DSH 就绪', tool: '', action: 'ready', ok: true });
     process.stdout.write('dsh-phone-bridge: listening on http://' + HOST + ':' + PORT + '/mcp (upstream ' + UPSTREAM + ')\n');
+    process.stdout.write('dsh-phone-bridge: progress SSE /events + poll /progress + hud ' + HUD_PATH + '\n');
 });
