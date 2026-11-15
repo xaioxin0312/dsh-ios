@@ -5,7 +5,80 @@ deb（`dev.airdevs.dsh`）一起安装**：原生层、bridge、launchd 自启�
 注册全部开箱即用；不再依赖单独的 app 包或手动装 ios-mcp。**+ios24.7**
 起再加组合动作 / 看屏 / 实时进度 HUD 与用户会话自启兜底。**+ios24.8**
 把实时进度改成「DSH 页面内主通道 + SpringBoard HUD 辅助」的双通道，
-修好真机上进度完全不可见，并继续压缩 see-act 往返。
+修好真机上进度完全不可见，并继续压缩 see-act 往返。**+ios24.9**
+全面对标 DSH Go 的操控效率模型：固定工具集、按行增量读屏、串行队列与
+停止围栏、intent / collect / skill / handoff 省链路工具，进度面板增加
+暂停 / 停止 / 插话 / 确认卡。
+
+## +ios24.9：全面对标 DSH Go 的操控效率模型
+
+> 用户要求：操控能力已经有了，问题是**效率低下**，要「像人一样高效」，
+> 并且要仔细参考 DSH Go。本版逐文件精读 `ccch1mneyyy/dsh-Go` 的
+> `PhoneToolCatalog.kt` / `ScreenDigest.kt` / `ScreenVerdict.kt` /
+> `SerialWorker.kt` / `PhonePrompts.kt` / `phone_skill*.dart` /
+> `phone-screen-stop.md` / `phone-overlay.md` 后落地。
+
+### 1) 固定工具集（KV cache 不再每轮失效）
+
+`tools/list` 恒返回 `FIXED_TOOLS`（28 个），**绝不读上游在线状态**。DSH Go 的
+`PhoneToolCatalog.kt` 明确写着：工具名/描述/schema 每轮请求都进模型上下文，任何
+变化都会让 DeepSeek 的 KV cache 从第一个改动 token 起整段作废。旧实现把 8090
+B 层工具动态合进清单，在线状态一变就整段失效。`phone_native{tool,args}` 是唯一
+逃生口：离线返回明确说明（含 `fixed_toolset_note`），不改清单；旧会话的
+`mcp__ios__*` / 原生工具名仍兼容转发，但不再多做 `initialize + tools/list` 回环。
+
+### 2) ScreenDigest / ScreenVerdict
+
+`screenDigest(runId, ui, opts)` 按行增量：屏幕编号 `sN`，元素编号按阅读顺序发放，
+同屏未变化只回「与 sN 相同，编号不变」，变化超过三分之一才整屏重发。屏幕状态
+按 runId 存在 `screenStore`（不再用全局单例，避免多轮串扰）。读不到可比对内容时
+明确说「**无法验证**」并返回 `changed:null` —— 缺少观测依据不等于界面没变，
+避免模型重复点击或误判列表到底。`phone_act` 结果新增 `ui_verdict` 与 `screen`。
+
+### 3) 省链路工具
+
+| 工具 | 对标 DSH Go | 说明 |
+| --- | --- | --- |
+| `phone_screen` | `screen` | 动作直接回新屏，不额外截图复核；默认纯文本，`detail` / `image` 按需 |
+| `phone_intent` | `intent` | 系统意图直达闹钟/日程/电话/导航/设置，「能办就别点界面」 |
+| `phone_collect` | `collect` | 长列表只读一次，设备端滚动 + 文字去重 + `until` |
+| `phone_skill_save` / `phone_skill_run` / `phone_skill_list` | `PhoneSkill` / `PhoneSkillReplay` | 成功轨迹参数化保存，后续一次调用重放；缺参数拒绝 |
+| `phone_handoff` | `handoff` | 登录 / 验证码 / 支付交还用户 |
+| `phone_batch` | — | 一次调用串多个工具 |
+| `phone_native` | — | 固定逃生口，离线解释 |
+| `phone_control` | `PhonePrompts` | 暂停 / 继续 / 停止 / 插话 |
+
+`initialize.instructions` 改成按效率从高到低的工具选择策略，模型一上来就知道
+优先 intent / skill / phone_act，而不是逐坐标点按。
+
+### 4) 串行队列与停止围栏
+
+`runSerialized(label, budgetMs, fn)`：所有动作单队列串行，每步 15s 预算；
+`controlState.epoch` 在暂停 / 继续 / 停止 / 插话时递增，入队时记下的 `admitted`
+与当前 epoch 不符就直接跳过（**旧动作不重放**）；卡死步骤超时中断并递增 epoch。
+等待用户的 `handoffWait` 时间不计入动作预算。
+
+### 5) /control 与进度面板交互
+
+| 端点 | 用途 |
+| --- | --- |
+| `GET /control` | 返回 `paused / stopped / epoch / last_action / handoff / interjects` |
+| `POST /control` | `{action: pause\|resume\|stop\|status\|continue\|interject, text?}` |
+
+SSE 快照每条带 `control`；`/health` 与 `progress_status` 暴露 `fixed_toolset` 与
+control 端点。进度面板（`one-package/dsh-ios-live-progress.js`）新增暂停/继续、
+停止、插话输入框、handoff 确认卡，XHR 优先 / fetch 兜底并乐观渲染。
+
+```sh
+curl http://127.0.0.1:8091/control
+curl -X POST http://127.0.0.1:8091/control -H 'Content-Type: application/json' \
+     -d '{"action":"interject","text":"换成用语音输入"}'
+sh phone-bridge/verify-phone-bridge.sh   # 6 章 81 项，含两组 +ios24.9 端到端
+```
+
+> 真机待复核：`phone_intent` 各 iOS URL scheme 为 best-effort 直达；
+> `phone_collect` 的滚动方向/去重需真列表验证；`phone_skill_*` 成功轨迹重放与
+> `phone_handoff` 在 Web Clip 内点确认卡尚未真机走查。
 
 ## +ios24.8：实时进度双通道、事件总线与效率工具
 
@@ -51,7 +124,7 @@ DSH 连错端口就绕过 bridge、事件根本不产生），保留用户其它
 
 ```sh
 dsh-phone-bridge-ctl hud    # ack / hud.json / /progress / 面板主通道 一次看全
-sh phone-bridge/verify-phone-bridge.sh   # 51 项，含事件流端到端实测
+sh phone-bridge/verify-phone-bridge.sh   # 含事件流端到端实测
 ```
 
 ## +ios24.7（历史）：操控提速、实时进度与自启兜底

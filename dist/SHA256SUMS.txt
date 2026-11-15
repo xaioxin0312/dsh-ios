@@ -241,6 +241,21 @@ bce5bf18cf3417110b47fa651001331a8cf87ebe7d9a23c5db73b6baaee7497d  dev.airdevs.ds
 # 路径相对 dist/。deb 内的是同一份，可用 dpkg-deb -x 后比对。
 fb2c27549482c42ebbe7b7ab31bda6217350a5563d83bae78533e7808aa87b24  ../phone-bridge/native/hud/dsh-ios-hud.dylib
 
+# +ios24.9（2026-11-15）：全面对标 DSH Go 的操控效率模型，从 rc.3 bundle
+#   完整重建。server.cjs 改为恒定 FIXED_TOOLS（28 个，不随 8090 在线状态
+#   变化）、screenDigest 按行增量读屏（sN 编号 / 无法验证 / ui_verdict）、
+#   runSerialized 串行队列 + epoch 围栏、phone_intent / phone_collect /
+#   phone_skill_* / phone_handoff / phone_control / phone_native / phone_batch
+#   与 /control 端点；dsh-ios-live-progress.js 增加暂停/停止/插话/确认卡。
+#   构建期新增 +ios24.9 强断言；verify-one-package.sh 新增 7c 章、
+#   verify-phone-bridge.sh 新增第 6 章（并把第 3 章 B 层动态合并断言改成
+#   恒定清单 + phone_native 转发）。HUD dylib 沿用 +ios24.8 新编版。
+# 核验：verify-one-package.sh 168 项全过（含 7c 章、静态 URL 鉴权黑盒、
+#   数据零改动实测、两次构建字节级可复现）；verify-phone-bridge.sh
+#   81 项全过（含离线控制链 EFFICIENCY_ALL_OK 与假上游 DIGEST_ALL_OK
+#   两组 +ios24.9 端到端）。
+5ffa3ab435712b8bf963a6886c154a9f9f50d50d4a6065f3d92808afd48484f2  dev.airdevs.dsh_0.2.2-rc.3+ios24.9_iphoneos-arm64.deb
+
 # --- 可选生态插件（手动安装，不预装）---
 f9f74e0f485148acfe544b88e35c17da196b6ff4c6da4f7a6576a7c566cd068a  dsh-ios-phone-control-0.1.0.tgz
 

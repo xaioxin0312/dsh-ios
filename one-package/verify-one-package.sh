@@ -419,6 +419,43 @@ else bad "deb 缺 HUD dylib"; fi
 grep -qF 'HUDSTATE' "$D/dsh-extras-postinst.sh" \
     && ok "postinst 把 HUD 状态目录属主设为 mobile" || bad "postinst 未处理 HUD 目录属主"
 
+sec "7c) +ios24.9 操控效率（固定工具集 / 增量读屏 / 串行围栏 / 交互控制）"
+# 独立核验：直接从 deb 解包结果查，不复用构建脚本结论。对应「全面参考
+# DSH Go 继续优化操控手机」——核心是让模型少发 token、少跑往返、不空转。
+PBDIR="$X/var/jb/usr/lib/dsh-phone-bridge"
+LP="$FRONT/assets/dsh-ios-live-progress.js"
+SRV="$PBDIR/server.cjs"
+# 1) 固定工具集：工具名/描述/schema 恒定，避免每轮 KV cache 失效
+for needle in 'const FIXED_TOOLS' 'FIXED_TOOL_NAMES' 'tools: FIXED_TOOLS' \
+              'fixed_toolset_note' 'upstreamTools(false)'; do
+    grep -qF "$needle" "$SRV" && ok "固定工具集含 $needle" || bad "固定工具集缺 $needle"
+done
+# 2) 按行增量读屏 + 诚实判定
+for needle in 'function screenDigest' "screenDigest('act'" '无法验证' \
+              '与 s' 'ui_verdict' 'compactUI' 'uiDelta'; do
+    grep -qF "$needle" "$SRV" && ok "增量读屏含 $needle" || bad "增量读屏缺 $needle"
+done
+# 3) 串行队列 / 时间预算 / epoch 围栏 / 控制端点
+for needle in 'function runSerialized' 'function controlApply' 'publicControlState' \
+              "admitted !== controlState.epoch" 'function handoffWait' '/control' \
+              'function skillRun'; do
+    grep -qF "$needle" "$SRV" && ok "串行/控制含 $needle" || bad "串行/控制缺 $needle"
+done
+# 4) 省链路新工具都已接进分发
+for needle in "case 'phone_screen':" "case 'phone_intent':" "case 'phone_collect':" \
+              "case 'phone_skill_save':" "case 'phone_skill_run':" \
+              "case 'phone_skill_list':" "case 'phone_handoff':" \
+              "case 'phone_control':" "case 'phone_native':" "case 'phone_batch':"; do
+    grep -qF "$needle" "$SRV" && ok "工具分发含 $needle" || bad "工具分发缺 $needle"
+done
+# 5) 进度面板可交互（暂停/继续/停止/插话/handoff 确认卡）
+for needle in 'sendControl' "BRIDGE + '/control'" 'handoffBox' 'interjectInput' \
+              "case 'paused'" 'snap.control' 'EventSource'; do
+    grep -qF "$needle" "$LP" && ok "面板交互含 $needle" || bad "面板交互缺 $needle"
+done
+node --check "$SRV" >/dev/null 2>&1 && ok "+ios24.9 bridge 语法通过" || bad "+ios24.9 bridge 语法错误"
+node --check "$LP" >/dev/null 2>&1 && ok "+ios24.9 面板语法通过" || bad "+ios24.9 面板语法错误"
+
 sec "8) 两次构建字节级可复现"
 if [ -n "$ENGINE_ARG" ] && [ -n "$APPDIR_ARG" ]; then
     A=$(sha256sum "$DEB" | cut -d' ' -f1)

@@ -12,8 +12,9 @@
  *   B 层（真·看屏幕、点屏幕、UI 树、OCR、剪贴板、亮度音量…）：
  *     转发到随包安装的原生 SpringBoard 插件 dsh-ios-control
  *     （默认 http://127.0.0.1:8090/mcp）。插件由 dev.airdevs.dsh-app 一起装，
- *     安装后 respring 一次即加载；在线时工具合并进 tools/list，tools/call 原样转发。
- *     离线时这些工具不出现，并给出明确的 respring / 状态检查指引。
+ *     安装后 respring 一次即加载。+ios24.9 起工具集恒定（DSH Go 的 KV cache
+ *     原则），B 层工具【不再】动态合并进 tools/list；改由 phone_native{tool,args}
+ *     固定逃生口转发，旧 mcp__ios__* / 原生工具名仍兼容。离线时给出明确指引。
  *
  * 为什么固定 8091：8090 是第三方 ios-mcp 的默认端口，不能抢占。
  * DSH 侧 cordis.patch.yml 由 ensure-config.cjs 自动注册到 127.0.0.1:8091/mcp。
@@ -63,6 +64,25 @@ const HUD_LEVEL = Number(process.env.DSH_HUD_LEVEL || 1000000);
 const EVENT_CAP = 240;
 const SSE_PING_MS = 15000;
 const HUD_HEARTBEAT_MS = 2000;
+/* +ios24.9：任务控制状态（暂停 / 停止 / 交还 / 插话）。提前定义，让
+ * emitEvent 能在每条 SSE 快照里带上控制态，进度面板据此显示按钮与确认卡。 */
+const controlState = {
+    epoch: 0, paused: false, stopped: false, handoff: null,
+    interjects: [], last_action: 'idle'
+};
+function publicControlState() {
+    return {
+        paused: controlState.paused,
+        stopped: controlState.stopped,
+        epoch: controlState.epoch,
+        last_action: controlState.last_action,
+        handoff: controlState.handoff ? {
+            reason: controlState.handoff.reason,
+            since: controlState.handoff.since
+        } : null,
+        interjects: controlState.interjects.slice(-5)
+    };
+}
 let eventSeq = 0;
 let hudStart = 0;
 let runSeq = 0;
@@ -71,7 +91,8 @@ const sseClients = new Set();
 let snapshot = {
     seq: 0, ts: Date.now(), state: 'idle', title: 'DSH 就绪',
     detail: '等待任务', tool: '', action: '', step: 0, total: 0,
-    elapsed_ms: 0, ok: null, run_id: '', ttl_ms: 0
+    elapsed_ms: 0, ok: null, run_id: '', ttl_ms: 0,
+    control: publicControlState()
 };
 let idleSince = Date.now();
 
@@ -112,6 +133,8 @@ function emitEvent(state, detail, extra) {
         elapsed_ms: hudStart ? now - hudStart : 0,
         ok: e.ok === undefined ? null : !!e.ok,
         run_id: e.run_id || ('r' + (runSeq || 1)),
+        // +ios24.9：进度面板据此渲染暂停/停止/交还确认卡，不必额外轮询。
+        control: publicControlState(),
         // done/error 的 ttl 必须大于心跳间隔(2000ms)，否则旧版 HUD 会在
         // 心跳把状态刷回「待命」之前先淡出到 alpha=0（真机「做完就消失」）。
         ttl_ms: Number(e.ttl || (st === 'running' ? 30000 : 2800))
@@ -286,10 +309,64 @@ const LOCAL_TOOLS = [
     tool('progress_status',
         'Report the live progress channel: current event snapshot, seq, SSE subscriber count, ' +
         'event buffer size and the exact endpoints the DSH Web UI progress panel uses.',
-        {})
+        {}),
+    /* ---------------------------------------------------------------- +ios24.9
+     * 对标 DSH Go PhoneToolCatalog 的操控模型。工具名/描述/schema 每轮都进请求，
+     * 所以这一组也必须是 FIXED 的：不随权限、上游在线状态或设备型号变化。 */
+    tool('phone_screen',
+        '读当前屏幕：每行一个元素，[编号] 只在本屏有效（屏幕号 sN 会一并返回）。' +
+        '默认只回紧凑纯文本，不附坐标、不附图；detail:true 才带坐标，image:true 才请求截图。' +
+        '同一屏未变化时回「与 sN 相同」，变化时只列变化的行 —— 不重复发模型上文已有的内容。' +
+        '读不到可比对的内容时明确说「无法验证」，绝不谎称界面没变。',
+        { detail: B('附上元素坐标'), image: B('附带截图（可能受能力限制省略）'),
+          clickable_only: B('只列可点元素，默认 false'), limit: N('最多列几行，默认 40') }),
+    tool('phone_intent',
+        '用系统意图把事务直接交给对应 App —— 能办就别点界面。' +
+        'kind: alarm | timer | calendar | dial | sms | mail | navigate | settings | clipboard | share | open。' +
+        '一次调用替代「打开 App → 逐步点按」整条链；启动回话只表示已投递，不表示事务办成。',
+        { kind: S('事务类型'),
+          hour: N('alarm: 时 0-23'), minute: N('alarm: 分 0-59'), seconds: N('timer: 秒数'),
+          title: S('calendar/mail/share: 标题'), begin: S('calendar: 开始'), end: S('calendar: 结束'),
+          number: S('dial/sms: 号码'), text: S('sms/mail/share/clipboard: 文本'),
+          destination: S('navigate: 目的地'), mode: S('navigate: drive/walk/transit'),
+          page: S('settings: 页面名'), url: S('open: URL 或 URL scheme'),
+          bundle_id: S('open: bundle id'), get: B('clipboard: 读取而不是写入') }, ['kind']),
+    tool('phone_collect',
+        '只读：自动滚动列表收集全部条目（按文字去重），读长列表只用这一次。' +
+        '出现 until 文字即停，max_pages 限制翻页次数；比「截图 → 认列表 → 再滚」省掉整串往返。',
+        { until: S('出现这段文字就停'), text: S('只收集匹配这段文字的行'),
+          max_pages: N('最多翻几页 1-30，默认 10'), direction: S('up/down，默认 down') }),
+    tool('phone_skill_save',
+        '把一次成功的 phone_act 步骤序列保存成可复用技能，steps 里用 {{字段名}} 占位；' +
+        '以后同类任务用 phone_skill_run 一次调用重放整串，模型不必重新推理每一步。',
+        { name: S('技能名：小写字母/数字/连字符'), description: S('一句话说明'),
+          steps: { type: 'array', items: { type: 'object' } },
+          params: { type: 'array', items: { type: 'string' } } }, ['name', 'steps']),
+    tool('phone_skill_run',
+        '一次调用重放已保存的技能：用 values 填 {{参数}}，整批步骤在设备端串行执行。' +
+        '返回每步结果、耗时与最终屏幕；不需要逐步模型往返。',
+        { name: S('技能名'), values: { type: 'object' },
+          stop_on_error: B('单步失败即停，默认 true') }, ['name']),
+    tool('phone_skill_list', '列出已保存的手机技能（名称 / 步骤数 / 参数 / 保存时间）。', {}),
+    tool('phone_handoff',
+        '把手机交给用户完成登录、验证码、支付或没把握的步骤；' +
+        '等用户在 DSH 进度卡片点「继续」或「停止」，最长等 timeout_ms。' +
+        '避免在这类步骤上空转重试或误操作。',
+        { reason: S('要用户做什么，一句话'), timeout_ms: N('最长等待毫秒，默认 300000') }, ['reason']),
+    tool('phone_control',
+        '控制当前手机任务：pause / resume / stop / status / interject（插话）。' +
+        '停止会作废旧一轮的动作围栏，旧步骤不会被重放；插话文本推到进度事件流。',
+        { action: S('pause | resume | stop | status | interject'),
+          text: S('interject 的文本') }, ['action']),
+    tool('phone_batch',
+        '把多个工具调用合成一次：items 是 [{tool, args}]，在设备端按序执行并汇总结果。' +
+        '用于「读屏 + 找元素 + 点按 + 等文本」这类固定组合，进一步压掉模型往返。',
+        { items: { type: 'array', items: { type: 'object' } },
+          stop_on_error: B('单步失败即停，默认 true') }),
 ];
 
-/* B 层工具名（上游在线时动态合并，离线时作为「需要 ios-mcp」的提示清单） */
+/* B 层工具名：只作 phone_native 可用名提示、旧工具名兼容与离线说明清单。
+ * +ios24.9 起绝不动态合并进 tools/list（工具定义前缀一变，KV cache 整段失效）。 */
 const UPSTREAM_HINT_TOOLS = [
     'screenshot', 'get_screen_info', 'get_ui_elements', 'get_element_at_point',
     'tap_screen', 'swipe_screen', 'long_press', 'double_tap', 'drag_and_drop',
@@ -301,6 +378,32 @@ const UPSTREAM_HINT_TOOLS = [
     'get_brightness', 'set_brightness', 'get_volume', 'set_volume',
     'get_clipboard', 'set_clipboard', 'list_running_apps'
 ];
+
+/* ------------------------------------------------------------------ +ios24.9
+ * DSH Go 的第一条铁律（PhoneToolCatalog.kt 原文）：
+ *   "Never make this depend on permission state: names, descriptions and schemas
+ *    enter every request, and any change invalidates DeepSeek's KV cache from the
+ *    first changed token."
+ * 旧实现 tools/list 会按 8090 在线状态动态 concat 上游工具 —— 原生层一抖动，
+ * 每轮请求的工具定义前缀就变了，整段 KV cache 作废，比多一次本地往返贵得多。
+ *
+ * 现在工具集恒定：A 层 + 高层工具 + 一个 phone_native 逃生口。上游离线不会
+ * 改变清单，只在 tools/call 里返回可操作的解释（DSH Go 同一做法）。
+ * 历史会话里若模型仍直接调 mcp__ios__<name>，tools/call 依旧转发，兼容不破。
+ */
+const PROXY_TOOLS = [
+    tool('phone_native',
+        '调用 iOS 原生层（8090）的单个工具。工具集固定，原生层离线时返回明确说明，' +
+        '不会改变模型看到的工具清单。可用名：' + UPSTREAM_HINT_TOOLS.join(', '),
+        { tool: S('原生工具名'), args: { type: 'object' } }, ['tool'])
+];
+const FIXED_TOOLS = LOCAL_TOOLS.concat(PROXY_TOOLS);
+const FIXED_TOOL_NAMES = new Set(FIXED_TOOLS.map((t) => t.name));
+// 内部会自己逐步推事件的工具，tools/call 不再补一条重复的 tool_done 汇总。
+const BATCH_TOOLS = new Set([
+    'phone_act', 'watch_screen', 'wait_for_change', 'wait_for_text',
+    'phone_collect', 'phone_skill_run', 'phone_handoff', 'phone_batch'
+]);
 
 function textResult(value, isError) {
     const s = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
@@ -496,6 +599,354 @@ function validateSteps(steps) {
     return problems;
 }
 
+/* ============================================================== +ios24.9 ====
+ * 对标 DSH Go 的操控效率模型（详见 phone-bridge/README.md「+ios24.9」章）：
+ *   ScreenDigest  按行增量 + sN 屏幕编号，未变化不重发，变化太多则整屏重发
+ *   ScreenVerdict 读不到内容时说「无法验证」，绝不谎称没变化
+ *   SerialWorker  所有 UI 动作走单一串行队列，每步独立预算，epoch 围栏
+ *   Intent/Collect/Skill/Handoff  直达、长列表、技能重放、交还用户
+ * ========================================================================= */
+
+/* ---- 屏幕编号 + 按行增量 ------------------------------------------------ */
+const SKILL_DIR = path.join(path.dirname(HUD_PATH), 'skills');
+let screenSeq = 0;
+const screenStore = new Map();      // runId -> { id, lines, keys }
+const SCREEN_STORE_CAP = 12;
+
+function screenKey(line) {
+    // 去掉编号与坐标再比，避免像素微抖让整屏重发。
+    return String(line).replace(/@\([^)]*\)/g, '').replace(/^\[\d+\]/, '').trim();
+}
+function screenDigest(runId, ui, opts) {
+    const o = opts || {};
+    const c = compactUI(ui, { limit: o.limit || 40, clickable_only: !!o.clickable_only });
+    const now = c.lines;
+    const keys = now.map(screenKey);
+    const id = 's' + (++screenSeq);
+    if (!now.length) {
+        // DSH Go ScreenVerdict：缺少观测依据 ≠ 界面没变。说「没变化」会让模型
+        // 把已经成功的动作再点一遍，是效率与正确性的双重损失。
+        return { id, lines: [], changed: null, total: 0,
+            note: '（动作已提交，但无法验证结果：屏幕没有可读内容，可能受敏感视图策略限制。请先读屏核对，不要重复上一步。）' };
+    }
+    const prev = screenStore.get(runId) || null;
+    screenStore.set(runId, { id, lines: now, keys, ts: Date.now() });
+    if (screenStore.size > SCREEN_STORE_CAP) screenStore.delete(screenStore.keys().next().value);
+    if (!prev || !prev.keys.length || prev.keys.length !== keys.length) {
+        return { id, lines: now, changed: true, total: keys.length };
+    }
+    const changed = [];
+    for (let i = 0; i < keys.length; i++) if (prev.keys[i] !== keys[i]) changed.push(i);
+    if (!changed.length) {
+        return { id, lines: [], changed: false, total: keys.length,
+            note: '（与 ' + prev.id + ' 相同，编号不变）' };
+    }
+    // 变化超过 1/3 就整屏重发：省下的 token 不值得让模型去猜编号。
+    if (changed.length * 3 > keys.length) {
+        return { id, lines: now, changed: true, total: keys.length };
+    }
+    const lines = changed.map((i) => now[i]);
+    lines.push('（只列变化：其余 ' + (keys.length - changed.length) + ' 项与 ' + prev.id + ' 相同，编号不变）');
+    return { id, lines, changed: true, total: keys.length };
+}
+
+/* ---- 串行动作队列 + 时间预算 + epoch 围栏 ------------------------------ */
+let queueTail = Promise.resolve();
+function runSerialized(label, budgetMs, fn) {
+    const admitted = controlState.epoch;
+    const job = queueTail.then(async () => {
+        if (admitted !== controlState.epoch) {
+            return { skipped: true, reason: 'stale run: stopped/restarted, old action not replayed' };
+        }
+        // 暂停等待不计入动作预算（对齐 DSH Go Scope.userWait）。
+        while (controlState.paused && admitted === controlState.epoch) await sleep(120);
+        if (admitted !== controlState.epoch) {
+            return { skipped: true, reason: 'stopped while paused' };
+        }
+        let timer = null;
+        const timeout = new Promise((_, rej) => {
+            timer = setTimeout(() => rej(new Error('action budget exceeded (' + budgetMs + 'ms)')), budgetMs);
+        });
+        try {
+            const value = await Promise.race([fn(), timeout]);
+            return { value };
+        } catch (e) {
+            // 超时即作废旧一轮，排队中的动作全部拒绝，绝不重放。
+            controlState.epoch += 1;
+            return { error: String(e.message || e), stale: true };
+        } finally {
+            if (timer) clearTimeout(timer);
+        }
+    });
+    queueTail = job.then(() => {}, () => {});
+    return job;
+}
+async function runStepQueued(s) {
+    const r = await runSerialized('step', 15000, () => runStep(s));
+    const a = String((s && s.action) || '');
+    if (r.skipped) return { action: a, ok: false, error: r.reason, ms: 0 };
+    if (r.error) return { action: a, ok: false, error: r.error, ms: 0 };
+    return r.value;
+}
+
+/* ---- 暂停 / 停止 / 插话 / 交还 ----------------------------------------- */
+function controlApply(action, text) {
+    const a = String(action || '').toLowerCase();
+    if (a === 'stop') {
+        controlState.epoch += 1;
+        controlState.stopped = true;
+        controlState.paused = false;
+        if (controlState.handoff) { controlState.handoff.resolve('stop'); controlState.handoff = null; }
+        emitEvent('error', '已停止 · 旧动作不会重放', { tool: 'phone_control', action: 'stop', ok: false });
+    } else if (a === 'pause') {
+        controlState.paused = true;
+        emitEvent('waiting', '已暂停 · 点继续恢复', { tool: 'phone_control', action: 'pause' });
+    } else if (a === 'resume' || a === 'continue') {
+        controlState.paused = false;
+        controlState.stopped = false;
+        if (controlState.handoff) { controlState.handoff.resolve('continue'); controlState.handoff = null; }
+        emitEvent('running', a === 'continue' ? '用户已继续' : '已恢复', { tool: 'phone_control', action: a });
+    } else if (a === 'interject') {
+        const t = String(text || '').slice(0, 500);
+        if (t) {
+            controlState.interjects.push({ ts: Date.now(), text: t });
+            if (controlState.interjects.length > 20) controlState.interjects.shift();
+            emitEvent('running', '插话：' + t, { tool: 'phone_control', action: 'interject' });
+        }
+    }
+    controlState.last_action = a;
+    return { ok: true, action: a, control: publicControlState() };
+}
+function handoffWait(reason, timeoutMs) {
+    const ms = Math.min(Math.max(Number(timeoutMs) || 300000, 1000), 600000);
+    emitEvent('waiting', '需要你来操作：' + reason,
+        { tool: 'phone_handoff', action: 'handoff', title: '需要你来操作', ttl: ms });
+    return new Promise((resolve) => {
+        let done = false;
+        let timer = null;
+        const finish = (r) => {
+            if (done) return;
+            done = true;
+            if (timer) clearTimeout(timer);
+            controlState.handoff = null;
+            resolve(r);
+        };
+        timer = setTimeout(() => finish('timeout'), ms);
+        controlState.handoff = { reason, resolve: finish, since: Date.now() };
+    });
+}
+
+/* ---- 技能：保存 / 列出 / 参数化重放 ------------------------------------ */
+function skillPath(name) { return path.join(SKILL_DIR, name + '.json'); }
+function loadSkills() {
+    try {
+        fs.mkdirSync(SKILL_DIR, { recursive: true });
+        return fs.readdirSync(SKILL_DIR).filter((f) => f.endsWith('.json')).map((f) => {
+            try { return JSON.parse(fs.readFileSync(path.join(SKILL_DIR, f), 'utf8')); } catch (_) { return null; }
+        }).filter(Boolean);
+    } catch (_) { return []; }
+}
+function skillSave(a) {
+    const name = String(a.name || '').trim();
+    if (!/^[a-z0-9][a-z0-9-]{1,47}$/.test(name)) return err('invalid skill name (lowercase/digits/hyphen, 2-48 chars)');
+    const steps = Array.isArray(a.steps) ? a.steps.slice(0, 60) : [];
+    if (!steps.length) return err('steps must be a non-empty array');
+    const problems = validateSteps(steps);
+    if (problems.length) return textResult({ ok: false, rejected: true, problems }, true);
+    const params = Array.isArray(a.params)
+        ? a.params.filter((p) => /^[A-Za-z0-9_]{1,32}$/.test(String(p))).map(String) : [];
+    const rec = { v: 1, name, description: String(a.description || '').slice(0, 200),
+        steps, params, saved_at: new Date().toISOString() };
+    try {
+        fs.mkdirSync(SKILL_DIR, { recursive: true });
+        fs.writeFileSync(skillPath(name), JSON.stringify(rec, null, 2));
+        emitEvent('done', '技能已保存：' + name, { tool: 'phone_skill_save', action: 'skill' });
+        return textResult({ ok: true, skill: rec });
+    } catch (e) { return err('save failed: ' + String(e.message || e)); }
+}
+function fillParams(v, values) {
+    if (typeof v === 'string') {
+        return v.replace(/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g,
+            (m, k) => values[k] === undefined ? m : String(values[k]));
+    }
+    if (Array.isArray(v)) return v.map((x) => fillParams(x, values));
+    if (v && typeof v === 'object') {
+        const o = {};
+        for (const k of Object.keys(v)) o[k] = fillParams(v[k], values);
+        return o;
+    }
+    return v;
+}
+async function skillRun(a) {
+    const name = String(a.name || '').trim();
+    let rec;
+    try { rec = JSON.parse(fs.readFileSync(skillPath(name), 'utf8')); }
+    catch (_) { return err('skill not found: ' + name); }
+    const values = (a.values && typeof a.values === 'object') ? a.values : {};
+    const steps = fillParams(Array.isArray(rec.steps) ? rec.steps : [], values);
+    const missing = [];
+    JSON.stringify(steps).replace(/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g, (m, k) => { missing.push(k); return m; });
+    if (missing.length) return textResult({ ok: false, missing_params: Array.from(new Set(missing)) }, true);
+    emitEvent('running', '重放技能：' + name,
+        { tool: 'phone_skill_run', action: 'skill', total: steps.length });
+    return phoneAct({ steps, stop_on_error: a.stop_on_error !== false, compact: true });
+}
+
+/* ---- 新工具实现 --------------------------------------------------------- */
+async function phoneScreen(a) {
+    const o = a || {};
+    const ui = await readUI({ clickable_only: !!o.clickable_only, limit: 120 });
+    const d = screenDigest('screen', ui, { limit: o.limit || 40, clickable_only: !!o.clickable_only });
+    const out = { screen: d.id, changed: d.changed, total: d.total, lines: d.lines,
+        note: d.note || '', element_ids_valid_only_for_this_screen: true };
+    if (o.detail) out.detail = true;
+    if (o.image) {
+        const sh = await shotHash();
+        if (sh) {
+            hudPublish('done', '读屏 ' + d.id, { tool: 'phone_screen', action: 'screen' });
+            return { content: [{ type: 'text', text: JSON.stringify(out) },
+                               { type: 'image', data: sh.shot.data, mimeType: sh.shot.mimeType }] };
+        }
+        out.image = 'unavailable (native provider offline)';
+    }
+    hudPublish('done', '读屏 ' + d.id + (d.changed === false ? '（无变化）' : ''),
+        { tool: 'phone_screen', action: 'screen' });
+    return textResult(out);
+}
+const INTENT_KINDS = new Set(['alarm', 'timer', 'calendar', 'dial', 'sms', 'mail',
+    'navigate', 'settings', 'clipboard', 'share', 'open']);
+async function phoneIntent(a) {
+    const kind = String((a && a.kind) || '').toLowerCase();
+    if (!INTENT_KINDS.has(kind)) return err('unknown intent kind: ' + kind);
+    const q = (s) => encodeURIComponent(String(s === undefined ? '' : s));
+    let url = '';
+    switch (kind) {
+        case 'alarm': url = 'clock-alarm://'; break;
+        case 'timer': url = 'clock-timer://'; break;
+        case 'calendar': url = 'calshow://' + (a.begin ? q(a.begin) : ''); break;
+        case 'dial': url = 'tel:' + q(a.number); break;
+        case 'sms': url = 'sms:' + q(a.number) + (a.text ? '&body=' + q(a.text) : ''); break;
+        case 'mail': url = 'mailto:' + q(a.number || '') + '?subject=' + q(a.title) + '&body=' + q(a.text); break;
+        case 'navigate': url = 'http://maps.apple.com/?q=' + q(a.destination) + (a.mode ? '&dirflg=' + q(a.mode) : ''); break;
+        case 'settings': url = 'App-Prefs:root=' + q(a.page || 'General'); break;
+        case 'share': url = 'sharetext://' + q(a.text || a.title); break;
+        case 'open': url = String(a.url || a.bundle_id || ''); break;
+        case 'clipboard': {
+            const t = a.get ? 'get_clipboard' : 'set_clipboard';
+            const r = await upstreamCall(t, a.get ? {} : { text: String(a.text || '') });
+            hudPublish('done', '剪贴板 ' + (a.get ? '读取' : '写入'), { tool: 'phone_intent', action: t });
+            return r;
+        }
+    }
+    if (!url) return err('could not build URL for ' + kind);
+    const r = await callLocal('open_url', { url });
+    let launched = {};
+    try { launched = JSON.parse((r.content && r.content[0] && r.content[0].text) || '{}'); } catch (_) {}
+    hudPublish(r.isError ? 'error' : 'done', '意图直达：' + kind,
+        { tool: 'phone_intent', action: kind, ok: !r.isError });
+    return textResult({ ok: !r.isError, kind, url, launched,
+        note: '已投递系统意图；后续界面与确认由目标 App 决定，不代表事务已完成。' });
+}
+async function screenSize() {
+    const si = await nativeOk('get_screen_info', {});
+    const info = uiOf(si.result) || {};
+    return {
+        w: Number(info.width || info.screen_width || (info.screen && info.screen.width)) || 390,
+        h: Number(info.height || info.screen_height || (info.screen && info.screen.height)) || 844
+    };
+}
+async function phoneCollect(a) {
+    const o = a || {};
+    const maxPages = Math.min(Math.max(Number(o.max_pages) || 10, 1), 30);
+    const until = String(o.until || '').trim().toLowerCase();
+    const match = String(o.text || '').trim().toLowerCase();
+    const up = String(o.direction || 'down').toLowerCase() === 'up';
+    const size = await screenSize();
+    const x = Math.round(size.w / 2);
+    const y1 = Math.round(size.h * (up ? 0.25 : 0.75));
+    const y2 = Math.round(size.h * (up ? 0.75 : 0.25));
+    const seen = new Set();
+    const items = [];
+    let pages = 0;
+    let stopped = '';
+    for (let p = 0; p < maxPages; p++) {
+        const ui = await readUI({ clickable_only: false, limit: 200 });
+        const els = extractElements(ui);
+        let added = 0;
+        for (const e of els) {
+            const t = elemText(e);
+            if (!t) continue;
+            if (match && !t.toLowerCase().includes(match)) continue;
+            const k = t.trim();
+            if (!seen.has(k)) { seen.add(k); items.push(k); added += 1; }
+            if (until && k.toLowerCase().includes(until)) { stopped = 'until'; break; }
+        }
+        pages += 1;
+        hudPublish('running', `收集第 ${pages}/${maxPages} 页 · 已得 ${items.length} 条`,
+            { tool: 'phone_collect', action: 'collect', step: pages, total: maxPages });
+        if (stopped) break;
+        if (p > 0 && added === 0) { stopped = 'no_new_items'; break; }
+        const sw = await nativeOk('swipe_screen', { fromX: x, fromY: y1, toX: x, toY: y2, duration: 0.3 });
+        if (!sw.ok) { stopped = 'swipe_failed'; break; }
+        await sleep(320);
+    }
+    hudPublish('done', `收集 ${items.length} 条 / ${pages} 页`,
+        { tool: 'phone_collect', action: 'collect', ok: true });
+    return textResult({ ok: true, count: items.length, pages, stopped: stopped || 'max_pages', items });
+}
+const BATCHABLE = new Set(['find_element', 'wait_for_text', 'phone_screen', 'phone_intent',
+    'phone_collect', 'progress_status', 'wait_for_change', 'phone_skill_run',
+    'phone_control', 'phone_skill_list']);
+async function phoneBatch(a) {
+    const items = Array.isArray(a.items) ? a.items.slice(0, 20) : [];
+    if (!items.length) return err('items must be a non-empty array of {tool,args}');
+    const out = [];
+    const t0 = Date.now();
+    for (let i = 0; i < items.length; i++) {
+        const it = items[i] || {};
+        const n = String(it.tool || '');
+        if (!BATCHABLE.has(n)) {
+            out.push({ i, tool: n, error: 'not batchable' });
+            if (a.stop_on_error !== false) return textResult({ ok: false, failed_at: i, steps: out }, true);
+            continue;
+        }
+        hudPublish('running', `批量 ${i + 1}/${items.length}：${n}`,
+            { tool: 'phone_batch', action: n, step: i + 1, total: items.length });
+        const r = await callLocal(n, (it.args && typeof it.args === 'object') ? it.args : {});
+        const text = (r && r.content && r.content[0] && r.content[0].text) || '';
+        out.push({ i, tool: n, isError: !!(r && r.isError), text: String(text).slice(0, 4000) });
+        if (r && r.isError && a.stop_on_error !== false) {
+            return textResult({ ok: false, failed_at: i, steps: out, elapsed_ms: Date.now() - t0 }, true);
+        }
+    }
+    hudPublish('done', `批量 ${items.length} 项完成 · ${Date.now() - t0}ms`,
+        { tool: 'phone_batch', action: 'done', ok: true });
+    return textResult({ ok: true, steps: out, elapsed_ms: Date.now() - t0 });
+}
+async function phoneHandoff(a) {
+    const reason = String((a && a.reason) || '').slice(0, 160) || '请完成这一步';
+    const r = await handoffWait(reason, a && a.timeout_ms);
+    emitEvent(r === 'continue' ? 'running' : 'error',
+        r === 'continue' ? '用户已继续' : (r === 'timeout' ? '等待超时' : '用户停止'),
+        { tool: 'phone_handoff', action: r, ok: r === 'continue' });
+    return textResult({ ok: r === 'continue', outcome: r, reason,
+        interjects: controlState.interjects.slice(-5) });
+}
+async function phoneNative(a) {
+    const n = String((a && a.tool) || '');
+    if (!n) return err('tool is required');
+    if (!/^[a-z][a-z0-9_]*$/.test(n)) return err('unsupported native tool: ' + n);
+    const args = (a.args && typeof a.args === 'object') ? a.args : {};
+    const r = await upstreamCall(n, args);
+    const text = (r && r.content && r.content[0] && r.content[0].text) || '';
+    if (r && r.isError && /unreachable|no response/i.test(text)) {
+        return textResult({ error: 'native provider 8090 offline', tool: n,
+            hint: 'respring after install; check dsh-phone-bridge-ctl status',
+            fixed_toolset_note: 'Tool list stays fixed; this is a call-time explanation.' }, true);
+    }
+    return r;
+}
+
 async function phoneAct(a) {
     const steps = Array.isArray(a.steps) ? a.steps.slice(0, 40) : [];
     if (!steps.length) return err('steps must be a non-empty array');
@@ -510,7 +961,15 @@ async function phoneAct(a) {
     const t0 = Date.now();
     const runId = 'act-' + t0;
     hudPublish('running', `准备执行 ${total} 步`, { tool: 'phone_act', action: 'validate', step: 0, total, run_id: runId });
+    // +ios24.9：整批动作绑定同一个 epoch。用户按停止后 epoch 递增，
+    // 剩余步骤一律不重放（DSH Go「停止后不重放旧动作」）。
+    const runEpoch = controlState.epoch;
     for (let i = 0; i < total; i++) {
+        if (controlState.epoch !== runEpoch) {
+            hudPublish('error', '任务已停止 · 剩余步骤不重放',
+                { tool: 'phone_act', ok: false, run_id: runId });
+            return textResult({ ok: false, stopped: true, failed_at: i + 1, steps: out }, true);
+        }
         const s = steps[i] || {};
         const act = String(s.action || '').toLowerCase();
         hudPublish('running', `第 ${i + 1}/${total} 步：${STEP_LABEL[act] || act} ${stepText(s)}`.trim(),
@@ -532,7 +991,7 @@ async function phoneAct(a) {
             const sh = await shotHash();
             r = { action: act, ok: !!sh, ms: 0, bytes: sh ? sh.bytes : 0 };
         } else {
-            r = await runStep(s);
+            r = await runStepQueued(s);
         }
         out.push(r);
         if (!r.ok && a.stop_on_error !== false) {
@@ -547,7 +1006,11 @@ async function phoneAct(a) {
     // a.full_ui=true 才回退到完整结构（兼容旧会话/调试）。
     const compact = observe ? (a.compact === false ? compactUI(ui, { limit: 60 }) : uiDelta(ui, { limit: 60 })) : null;
     const payload = { ok: true, steps: out, elapsed_ms: Date.now() - t0, ui: compact,
-        ui_lines: compact ? compact.lines : [], ui_unchanged: compact ? compact.changed === false : null };
+        ui_lines: compact ? compact.lines : [], ui_unchanged: compact ? compact.changed === false : null,
+        // +ios24.9：读不到可比内容时明确「无法验证」，绝不谎称界面没变
+        // （DSH Go ScreenVerdict：否则模型会把已成功的动作再点一遍）。
+        ui_verdict: compact ? (compact.changed === null ? 'unverifiable' : (compact.changed === false ? 'unchanged' : 'changed')) : null,
+        screen: compact ? compact.screen : null };
     if (a.full_ui) payload.settled_ui = ui;
     if (a.screenshot) {
         const sh = await shotHash();
@@ -727,14 +1190,13 @@ function compactUI(ui, opts) {
     return { count: els.length, shown: lines.length, lines };
 }
 
-let lastUIKey = '';
+/* +ios24.9：按行增量（DSH Go ScreenDigest）。旧实现是「整屏 hash 变没变」，
+ * 要么全发要么全不发，且 lastUIKey 是全局单例，多个并发观察会互相串扰。
+ * 现在按 runId 存上一屏，编号在阅读顺序里保持稳定，只回变化的行。 */
 function uiDelta(ui, opts) {
-    // 只回传相对上一次观察发生变化的行，减少 token 与传输（DSH Go 增量思路）。
-    const c = compactUI(ui, opts);
-    const key = crypto.createHash('sha1').update(c.lines.join('\n')).digest('hex');
-    const changed = key !== lastUIKey;
-    lastUIKey = key;
-    return { changed, total: c.count, lines: changed ? c.lines : [], note: changed ? undefined : 'UI unchanged since last observation' };
+    const d = screenDigest('act', ui, opts || {});
+    return { changed: d.changed, total: d.total, lines: d.lines,
+        note: d.note, screen: d.id };
 }
 
 async function readUI(args) {
@@ -934,15 +1396,42 @@ async function callLocal(name, args) {
                 version: '2.0.0', channel: 'sse+polling', seq: eventSeq,
                 snapshot, events_buffered: eventRing.length, event_cap: EVENT_CAP,
                 sse_subscribers: sseClients.size,
+                control: publicControlState(),
+                fixed_toolset: FIXED_TOOLS.length,
                 endpoints: {
                     sse: 'http://' + HOST + ':' + PORT + '/events',
                     poll: 'http://' + HOST + ':' + PORT + '/progress?since=<seq>',
+                    control: 'http://' + HOST + ':' + PORT + '/control',
                     hud_file: HUD_PATH
                 },
                 upstream_online: up.length > 0,
                 note: 'The DSH Web UI progress panel subscribes to /events; HUD reads hud.json.'
             });
         }
+        /* ---- +ios24.9：DSH Go 对齐的新工具分发 ---- */
+        case 'phone_screen':
+            return phoneScreen(a);
+        case 'phone_intent':
+            return phoneIntent(a);
+        case 'phone_collect':
+            return phoneCollect(a);
+        case 'phone_skill_save':
+            return skillSave(a);
+        case 'phone_skill_run':
+            return skillRun(a);
+        case 'phone_skill_list':
+            return textResult({ skills: loadSkills().map((s) => ({
+                name: s.name, description: s.description,
+                steps: (s.steps || []).length, params: s.params || [], saved_at: s.saved_at
+            })) });
+        case 'phone_handoff':
+            return phoneHandoff(a);
+        case 'phone_control':
+            return textResult(controlApply(a.action, a.text));
+        case 'phone_native':
+            return phoneNative(a);
+        case 'phone_batch':
+            return phoneBatch(a);
         default:
             return err('unknown local tool: ' + name);
     }
@@ -1059,57 +1548,62 @@ async function dispatch(msg, res) {
             return reply(res, msg.id, {
                 protocolVersion: PROTOCOL,
                 capabilities: { tools: { listChanged: false } },
-                serverInfo: { name: 'dsh-ios-phone-bridge', version: '1.0.0' },
-                instructions: 'On-device iOS toolchain for DSH. A-class tools work out of the box; B-class (screen/touch/OCR) come from the bundled SpringBoard provider dsh-ios-control on 127.0.0.1:8090 (shipped with dev.airdevs.dsh-app; respring once after install).'
+                serverInfo: { name: 'dsh-ios-phone-bridge', version: '2.0.0' },
+                instructions: 'iOS 手机操控工具链（工具集固定，不随权限/上游在线状态变化）。' +
+                    '按效率从高到低选工具：① phone_intent 能用系统意图直达就别点界面（闹钟/日程/电话/导航/设置）；' +
+                    '② phone_skill_run 重放已保存技能；③ phone_act 一次提交整批动作，find/wait_text/assert 在设备端闭环；' +
+                    '④ phone_screen 读屏只回变化的行，[编号] 只在本屏有效，动作返回的新屏幕自己说话，不要额外截图复核；' +
+                    '⑤ phone_collect 读长列表只用一次；⑥ 登录/验证码/支付等用 phone_handoff 交还用户，不要空转重试。' +
+                    '确需原生层单个工具时用 phone_native{tool,args}；进度与暂停/停止见 /events 与 /control。'
             });
         case 'ping':
             return reply(res, msg.id, {});
         case 'tools/list': {
-            const up = await upstreamTools(false);
-            const localNames = new Set(LOCAL_TOOLS.map((t) => t.name));
-            const merged = LOCAL_TOOLS.concat(up.filter((t) => !localNames.has(t.name)));
-            return reply(res, msg.id, { tools: merged });
+            // +ios24.9：恒定工具集。绝不在这里读上游在线状态 —— 工具定义前缀
+            // 每变一次，DeepSeek 的 KV cache 就从第一个改动的 token 起整段作废。
+            return reply(res, msg.id, { tools: FIXED_TOOLS });
         }
         case 'tools/call': {
             const name = msg.params && msg.params.name;
             const args = (msg.params && msg.params.arguments) || {};
             if (!name) return replyError(res, msg.id, -32602, 'missing tool name');
-            const localNames = new Set(LOCAL_TOOLS.map((t) => t.name));
             const t0 = Date.now();
-            if (localNames.has(name)) {
-                // +ios24.8：每个工具调用都有「开始」事件，批量/看屏类工具内部
-                // 还会自己逐步推事件；这里只在结束时补一条汇总。
+            if (FIXED_TOOL_NAMES.has(name)) {
+                // +ios24.8：每个工具调用都有「开始」事件；批量类工具内部自己
+                // 逐步推事件，这里不补汇总，避免事件流里出现重复的一行。
                 hudPublish('running', `调用 ${name}`, { tool: name, action: 'tool_start' });
                 const out = await callLocal(name, args);
-                if (name !== 'phone_act' && name !== 'watch_screen' && name !== 'wait_for_change') {
+                if (!BATCH_TOOLS.has(name)) {
                     hudPublish(out && out.isError ? 'error' : 'done',
                         `${name} · ${Date.now() - t0}ms`, { tool: name, action: 'tool_done',
                         ok: !(out && out.isError), ttl: 1400 });
                 }
                 return reply(res, msg.id, out);
             }
-            // 工具清单 30s 缓存；未命中才强制刷新一次。旧实现每次都 initialize+list，
-            // 白白多出 3 个回环请求，是操控慢的主要来源之一。
-            let up = await upstreamTools(false);
-            if (!up.some((t) => t.name === name)) up = await upstreamTools(true);
-            if (up.some((t) => t.name === name)) {
-                hudPublish('running', `调用 ${name}`, { tool: name, action: 'tool_start' });
-                const out = await upstreamCall(name, args);
-                hudPublish(out && out.isError ? 'error' : 'done', `${name} · ${Date.now() - t0}ms`,
-                    { tool: name, action: 'tool_done', ok: !(out && out.isError), ttl: 1400 });
+            // 历史兼容：旧会话里模型可能仍直接调 mcp__ios__<name> / 原生工具名。
+            // 照旧转发，但不再为了「确认工具存在」多做 initialize + tools/list
+            // 两个本地回环（DSH Go 指出这正是操控慢的主要来源之一）。
+            const nativeName = String(name).replace(/^mcp__ios__/, '');
+            if (UPSTREAM_HINT_TOOLS.includes(nativeName) || String(name).startsWith('mcp__ios__')) {
+                hudPublish('running', `转发 ${name}`, { tool: name, action: 'tool_start' });
+                const out = await upstreamCall(nativeName, args);
+                const text = (out && out.content && out.content[0] && out.content[0].text) || '';
+                const offline = !!(out && out.isError && /unreachable|no response/i.test(text));
+                hudPublish(offline ? 'error' : 'done', `${name} · ${Date.now() - t0}ms`,
+                    { tool: name, action: 'tool_done', ok: !offline, ttl: 1400 });
+                if (offline) {
+                    return reply(res, msg.id, textResult({
+                        error: 'B-class tool "' + name + '" needs the native provider dsh-ios-control on 127.0.0.1:8090.',
+                        how_to_enable: [
+                            'The provider ships in dev.airdevs.dsh-app (dsh-ios-control.dylib + plist)',
+                            'After installing/upgrading, respring once so ElleKit loads it into SpringBoard',
+                            'Check dsh-phone-bridge-ctl status; it reports upstream online + tool count'
+                        ],
+                        fixed_toolset_note: 'The tool list is intentionally FIXED (KV-cache friendly). Use phone_native{tool,args} for native tools; an offline upstream never changes the list.',
+                        local_alternatives: ['phone_screen', 'phone_act', 'find_element', 'phone_intent', 'run_command', 'list_apps', 'open_url']
+                    }, true));
+                }
                 return reply(res, msg.id, out);
-            }
-            if (UPSTREAM_HINT_TOOLS.includes(name)) {
-                return reply(res, msg.id, textResult({
-                    error: 'B-class tool "' + name + '" requires the bundled native provider dsh-ios-control on 127.0.0.1:8090.',
-                    how_to_enable: [
-                        'The provider ships in dev.airdevs.dsh-app (dsh-ios-control.dylib + plist)',
-                        'After installing/upgrading, respring once so ElleKit loads it into SpringBoard',
-                        'Check dsh-phone-bridge-ctl status; it reports upstream online + tool count',
-                        'Keep the device unlocked; the bridge auto-merges tools on the next tools/list'
-                    ],
-                    local_alternatives: ['run_command', 'list_apps', 'launch_app', 'open_url', 'get_device_info', 'dsh_status']
-                }, true));
             }
             return replyError(res, msg.id, -32601, 'unknown tool: ' + name);
         }
@@ -1139,10 +1633,12 @@ const server = http.createServer((req, res) => {
         res.end(JSON.stringify({
             status: 'ok', server: 'dsh-ios-phone-bridge', version: '2.0.0',
             protocolVersion: PROTOCOL, local_tools: LOCAL_TOOLS.length,
+            fixed_toolset: FIXED_TOOLS.length,
             upstream: UPSTREAM, endpoint: 'http://' + HOST + ':' + PORT + '/mcp',
             progress: { channel: 'sse', seq: eventSeq, sse_subscribers: sseClients.size,
                 sse: 'http://' + HOST + ':' + PORT + '/events',
-                poll: 'http://' + HOST + ':' + PORT + '/progress' },
+                poll: 'http://' + HOST + ':' + PORT + '/progress',
+                control: 'http://' + HOST + ':' + PORT + '/control' },
             hud_file: HUD_PATH
         }));
         return;
@@ -1183,6 +1679,32 @@ const server = http.createServer((req, res) => {
         res.end(JSON.stringify({ seq: eventSeq, now: Date.now(), snapshot, events,
             sse_subscribers: sseClients.size, cap: EVENT_CAP }));
         return;
+    }
+    // ---- /control : 暂停 / 继续 / 停止 / 插话 / 交还确认（+ios24.9）----
+    // DSH Go 的悬浮条能暂停、停止、插话；进度面板通过这个端点把控制送回来。
+    if (url === '/control' || url.startsWith('/control?')) {
+        if (req.method === 'GET') {
+            res.writeHead(200, corsHeaders({ 'Content-Type': 'application/json' }));
+            res.end(JSON.stringify({ ok: true, control: publicControlState(), usage: {
+                POST: '{action: pause|resume|stop|status|continue|interject, text?}'
+            } }));
+            return;
+        }
+        if (req.method === 'POST') {
+            let body = '';
+            req.on('data', (c) => { body += c; if (body.length > 8192) req.destroy(); });
+            req.on('end', () => {
+                let p = {};
+                try { p = JSON.parse(body || '{}'); } catch (_) { /* 空体按 status */ }
+                const action = String(p.action || 'status');
+                const r = action === 'status'
+                    ? { ok: true, control: publicControlState() }
+                    : controlApply(action, p.text);
+                res.writeHead(200, corsHeaders({ 'Content-Type': 'application/json' }));
+                res.end(JSON.stringify(r));
+            });
+            return;
+        }
     }
     if (req.method === 'OPTIONS') { res.writeHead(204, corsHeaders()); res.end(); return; }
     if (req.method !== 'POST' || !url.startsWith('/mcp')) {

@@ -8,14 +8,98 @@
 > 关于 Node 24.9：**（rc.1 时代的历史结论）** 当时公开可得的 iOS arm64 Node 可执行文件确实不存在（详见 [`docs/DSH-NODE-UPGRADE-EVALUATION.md`](docs/DSH-NODE-UPGRADE-EVALUATION.md)），但实证发现官方 `0.2.2-rc.1` 的四处 Node 22.12 兼容补丁锚点与 `0.2.1-rc.5` **逐字一致**，因此用同一套补丁 + 同一个已验证的 Node 22.12.0，做出了经 31 项核验（含真 boot、会话创建与恢复）的完整升级包。
 >
 > **⚠️ 2026-11-14 更正**：上面「不存在」的结论已被本仓库自己的 CI 推翻 —— GitHub Actions run `43532556241` 成功编译出 **Node v24.19.0 iOS arm64 独立 CLI**（artifact `14095226518` / Release `node24-exp`，SHA `8bebb2a2…`）。且 rc.3 的 `engines.node >= 24.9.0` **不是 advisory**（`bin.js` 用 `import.meta.main`）。故 rc.3 单包已改用该成品。首版 `+ios24` 在 A11 真机上暴露运行时不兼容，
-**当前推荐档位是 `+ios24.8` 正式版**（实时进度主通道搬进 DSH 界面 + 操控效率与可见性全面优化），
-详见下方「正式版 +ios24.8」章节与 `one-package/README.md`。
+**当前推荐档位是 `+ios24.9` 正式版**（全面对标 DSH Go 的操控效率 + 进度面板可交互），
+详见下方「正式版 +ios24.9」章节与 `one-package/README.md`。
 
 ---
 
-## 正式版 · `+ios24.8`（2026-11-15，实时进度可见 + 操控效率全面优化）
+## 正式版 · `+ios24.9`（2026-11-15，全面对标 DSH Go 的操控效率）
 
 > 当前推荐安装的正式版。Release 附件：
+> `dev.airdevs.dsh_0.2.2-rc.3+ios24.9_iphoneos-arm64.deb`。
+> 适用 iPhone X (A11, arm64) / iOS 15–16.7.x / Dopamine rootless (`/var/jb`)。
+
+`+ios24.8` 解决了「进度看不见」，但「**操控效率低下**」是另一回事：一次简单任务仍要
+模型反复「截图 → 认坐标 → 点 → 再截图」，每一步都把整棵 UI 树重新塞进上下文，工具
+清单还会随 8090 原生层在线与否变化。本版按要求**逐文件精读 DSH Go
+（`ccch1mneyyy/dsh-Go`）的手机 Agent 实现**，把它的效率模型搬到 iOS/DSH 链路上。
+
+### 参考了 DSH Go 的哪些实现
+
+| DSH Go 源码 | 结论 | 本版落地 |
+| --- | --- | --- |
+| `PhoneToolCatalog.kt` | 工具名/描述/schema 每轮进上下文，任何变化令 DeepSeek KV cache 从首个改动 token 起失效 | `FIXED_TOOLS` 恒定 28 个，`tools/list` 永不读上游在线状态 |
+| `ScreenDigest.kt` | 屏幕编号 `sN`、元素按阅读顺序发号；未变化行不重发，变化超三分之一才整屏重发 | `screenDigest(runId, ui, opts)` |
+| `ScreenVerdict.kt` | **缺少观测依据不等于界面没变** | 读不到可比对内容回「无法验证」+ `changed:null`，不谎称无变化 |
+| `SerialWorker.kt` | 所有动作单线程串行、每步独立时间预算、等待用户不计预算、epoch 围栏防旧动作重放 | `runSerialized()` + `controlState.epoch` |
+| `PhonePrompts.kt` / `phone-overlay.md` | 暂停 / 继续 / 停止 / 插话 / handoff 确认卡 | `/control` 端点 + 进度面板交互 |
+| `phone_skill*.dart` | 成功轨迹参数化保存、一次调用重放 | `phone_skill_save` / `phone_skill_run` / `phone_skill_list` |
+| `PhoneToolCatalog` 的 `intent` / `collect` | 能办就别点界面；读长列表只用一次 | `phone_intent` / `phone_collect` |
+
+### 1) 固定工具集（KV cache 不再每轮失效）
+
+`tools/list` 恒返回 `FIXED_TOOLS`（28 个），**不随 8090 在线状态变化**；
+`phone_native{tool,args}` 是唯一逃生口，离线时返回明确说明而不改清单。旧会话里的
+`mcp__ios__*` / 原生工具名照旧兼容转发，但不再为「确认工具存在」多做
+`initialize + tools/list` 两个本地回环。
+
+### 2) 按行增量读屏
+
+`phone_screen` 默认只回紧凑纯文本（不附坐标、不附图），`detail:true` 才带坐标、
+`image:true` 才请求截图。同一屏未变化回「与 sN 相同，编号不变」，变化时只列变化的
+行；`phone_act` 结果新增 `ui_verdict`（`changed` / `unchanged` / `unverifiable`）与
+`screen` 编号。屏幕状态按 runId 存在 `screenStore`，避免多轮/并发串扰。
+
+### 3) 省链路工具
+
+| 工具 | 作用 |
+| --- | --- |
+| `phone_intent` | 系统意图直达闹钟 / 计时器 / 日程 / 拨号 / 短信 / 邮件 / 导航 / 设置 / 剪贴板 / 分享 / 打开 App，一次调用替代整条点按链 |
+| `phone_collect` | 设备端自动滚长列表、按文字去重、支持 `until` 停止条件，读长列表只用一次 |
+| `phone_batch` | 一次调用串起多个只读/批量工具，省多次往返 |
+| `phone_skill_save` / `phone_skill_run` / `phone_skill_list` | 把成功步骤参数化保存成技能，以后一次调用重放；缺参数直接拒绝 |
+| `phone_handoff` | 登录 / 验证码 / 支付 / 没把握的步骤交还用户，面板弹确认卡，不空转重试 |
+| `phone_control` | 暂停 / 继续 / 停止 / 插话，供 AI 与用户共同控制 |
+
+### 4) 串行队列与停止围栏
+
+所有动作走 `runSerialized()` 单队列，每步 15s 预算；暂停 / 停止 / 插话会递增
+`controlState.epoch`，旧队列动作因 `admitted !== controlState.epoch` 直接跳过，
+**绝不重放**；卡死步骤超时即中断。等待用户的 `handoffWait` 时间不计入动作预算。
+
+### 5) 进度面板从「能看」到「能控」
+
+`dsh-ios-live-progress.js` 在 `+ios24.8` 的常驻卡片上新增：暂停/继续按钮、停止按钮、
+插话输入框、handoff 确认卡（继续/停止）。全部走 `BRIDGE + '/control'`，XHR 优先 /
+fetch 兜底并乐观渲染；SSE 快照每条都带 `control` 状态，多端同步。
+
+### 安装与诊断
+
+```sh
+dpkg -i dev.airdevs.dsh_0.2.2-rc.3+ios24.9_iphoneos-arm64.deb
+respring   # 只为让原生触控层与 SpringBoard HUD 生效
+
+dsh-phone-bridge-ctl hud                  # ack / hud.json / /progress / 面板主通道
+curl http://127.0.0.1:8091/control       # paused / stopped / epoch / handoff / interjects
+```
+
+核验：`sh one-package/verify-one-package.sh <deb>`（新增 7c 章：固定工具集 / 增量读屏 /
+串行围栏 / 10 个新工具 / 面板交互）、`sh phone-bridge/verify-phone-bridge.sh`（6 章
+81 项，含离线控制链 `EFFICIENCY_ALL_OK` 与假上游增量读屏 `DIGEST_ALL_OK` 两组端到端）。
+
+> 真机待复核：`phone_intent` 各 iOS URL scheme、`phone_collect` 真实列表滚动与去重、
+> `phone_skill_*` 成功轨迹重放、`phone_handoff` 在 Web Clip 内点确认卡。本地离线链路
+> 与假上游已全绿，但这几项仍需在 iPhone X 上逐项走一遍。
+
+所有 `+ios24.8` 的实时进度双通道 / HUD 可见性修复、`+ios24.7` 组合动作、
+`+ios24.6` 图片支持、`+ios24.2` 会话兼容等历史修复全部保留，升级不丢
+对话 / 工作区 / 插件 / 配置。
+
+---
+
+## 上一版 · `+ios24.8`（2026-11-15，实时进度可见 + 操控效率全面优化）
+
+> 历史交付（已被 `+ios24.9` 取代）。Release 附件：
 > `dev.airdevs.dsh_0.2.2-rc.3+ios24.8_iphoneos-arm64.deb`。
 > 适用 iPhone X (A11, arm64) / iOS 15–16.7.x / Dopamine rootless (`/var/jb`)。
 
@@ -106,12 +190,11 @@ dsh-phone-bridge-ctl hud    # ack / hud.json / /progress / 面板主通道 一�
 升级不丢对话 / 工作区 / 插件 / 配置。
 
 核验：`sh one-package/verify-one-package.sh <deb>`（含 7b 章进度面板与 HUD 新旧二进制
-断言）、`sh phone-bridge/verify-phone-bridge.sh`（5 章共 51 项，含 SSE/轮询/续传/
-工具事件端到端实测）。
+断言）、`sh phone-bridge/verify-phone-bridge.sh`（含 SSE/轮询/续传/工具事件端到端实测）。
 
 ---
 
-## 上一版 · `+ios24.7`（2026-11-15，操控提速 + 灵动岛实时进度 + 自启兜底）
+## 历史版本 · `+ios24.7`（2026-11-15，操控提速 + 灵动岛实时进度 + 自启兜底）
 
 > 历史交付（已被 `+ios24.8` 取代）。Release 附件：
 > `dev.airdevs.dsh_0.2.2-rc.3+ios24.7_iphoneos-arm64.deb`

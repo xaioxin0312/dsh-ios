@@ -397,14 +397,34 @@ fi
 # +ios24.x 的 changelog 只写在 stage 副本里：共享 control 原文件一个字节不动。
 # +ios18 是已冻结的对照档（927b5308…），当前源码面向 +ios24.6，不再承诺
 # 从当前 HEAD 重新构建 +ios18 能 1:1 复现当时的历史产物。
-case "$TAG" in ios24.1|ios24.2|ios24.3|ios24.4|ios24.5|ios24.6|ios24.7|ios24.8) ;; *) skip_changelog=1 ;; esac
+case "$TAG" in ios24.1|ios24.2|ios24.3|ios24.4|ios24.5|ios24.6|ios24.7|ios24.8|ios24.9) ;; *) skip_changelog=1 ;; esac
 if [ "${skip_changelog:-0}" != "1" ]; then
     python3 - "$STAGE/DEBIAN/control" "$TAG" <<'PY'
 import sys
 p, tag = sys.argv[1:3]
 s = open(p, encoding='utf-8').read()
 extra = ""
-if tag == "ios24.8":
+if tag == "ios24.9":
+    extra = """ * 深度对标 DSH Go 的手机 Agent 效率模型：工具集恒定，绝不随 8090 原生层
+   在线状态变化 —— 工具名 / 描述 / schema 每轮都进模型上下文，任何变化
+   都会让 DeepSeek 的 KV cache 从第一个改动的 token 起整段作废；原生层
+   离线也不改清单，只由 phone_native 逃生口给出明确说明；
+ * 按行增量读屏（ScreenDigest）：屏幕编号 sN，元素编号按阅读顺序发放，
+   未变化的行不重复发、变化超过三分之一才整屏重发；读不到可比对内容时
+   明确说「无法验证」，绝不谎称界面没变（ScreenVerdict）；
+ * 省链路新工具：phone_intent 用系统意图直达闹钟 / 日程 / 电话 / 导航 /
+   设置（能办就别点界面）、phone_collect 自动滚长列表一次收集去重、
+   phone_skill_save / phone_skill_run 把成功轨迹存成技能一次重放、
+   phone_handoff 把登录 / 验证码 / 支付交还用户、phone_batch 批量组合；
+ * 串行动作队列 + 每步时间预算 + epoch 围栏：暂停 / 停止 / 插话后旧队列
+   动作一律不重放，卡死步骤超时即中断（对标 SerialWorker 的停止语义）；
+ * 进度面板可交互：暂停 / 继续 / 停止按钮、插话输入框、handoff 确认卡，
+   统一走 /control 端点，SSE 快照实时带 control 状态；
+ * 保留 +ios24.8 的实时进度双通道与 HUD 可见性修复、+ios24.7 组合动作、
+   +ios24.6 图片支持、+ios24.2 会话兼容等全部历史修复，升级不丢
+   插件 / 工作区 / 对话 / 配置。
+"""
+elif tag == "ios24.8":
     extra = """ * 实时进度「看得见」：进度主通道搬进 DSH Web UI 内（右下角常驻面板），
    对标 DSH Go 的状态机与工具调用折叠——状态灯 / 当前动作 / 第 n/N 步 /
    实时耗时 / 进度线 / 可折叠事件流，全程不依赖 SpringBoard 注入与灵动岛；
@@ -670,6 +690,50 @@ node --check "$BR/ensure-config.cjs" || exit 1
 grep -qF 'hud_diag' "$STAGE/var/jb/usr/bin/dsh-phone-bridge-ctl" || {
     echo "构建中止：ctl 缺 hud 诊断命令" >&2; exit 1; }
 echo "    +ios24.8 断言通过（进度面板 / SSE / 效率工具 / 8090 去重 / HUD 诊断）"
+
+# +ios24.9：深度对标 DSH Go 的手机 Agent 效率模型。固定工具集（KV cache）、
+# 按行增量读屏（ScreenDigest/ScreenVerdict）、串行队列与 epoch 围栏、
+# intent/collect/skill/handoff 省链路工具、可交互进度控制，缺一不出包。
+echo "==> 构建期 +ios24.9 断言（固定工具集 / 增量读屏 / 串行围栏 / 交互控制）"
+FR="$STAGE/var/jb/usr/lib/dsh/node_modules/@deepseek-ai/dsh-web-frontend/dist"
+BR="$STAGE/var/jb/usr/lib/dsh-phone-bridge"
+# 1) 固定工具集：tools/list 恒返回 FIXED_TOOLS，绝不读上游在线状态
+for needle in 'const FIXED_TOOLS' 'FIXED_TOOL_NAMES' 'tools: FIXED_TOOLS' \
+              'fixed_toolset_note' 'upstreamTools(false)'; do
+    grep -qF "$needle" "$BR/server.cjs" || {
+        echo "构建中止：bridge 缺固定工具集要素 $needle" >&2; exit 1; }
+done
+# 2) 按行增量读屏 + 诚实判定（缺少观测依据不等于界面没变）
+for needle in 'function screenDigest' "screenDigest('act'" '无法验证' \
+              '与 s' 'ui_verdict' 'compactUI' 'uiDelta'; do
+    grep -qF "$needle" "$BR/server.cjs" || {
+        echo "构建中止：bridge 缺增量读屏要素 $needle" >&2; exit 1; }
+done
+# 3) 串行动作队列 + 每步预算 + epoch 围栏 + /control 端点
+for needle in 'function runSerialized' 'function controlApply' 'publicControlState' \
+              "admitted !== controlState.epoch" 'controlState.epoch' '/control' \
+              'function handoffWait' 'function skillRun'; do
+    grep -qF "$needle" "$BR/server.cjs" || {
+        echo "构建中止：bridge 缺串行围栏/控制端点 $needle" >&2; exit 1; }
+done
+# 4) 省链路新工具真的接进 callLocal 分发
+for needle in "case 'phone_screen':" "case 'phone_intent':" "case 'phone_collect':" \
+              "case 'phone_skill_save':" "case 'phone_skill_run':" \
+              "case 'phone_skill_list':" "case 'phone_handoff':" \
+              "case 'phone_control':" "case 'phone_native':" "case 'phone_batch':"; do
+    grep -qF "$needle" "$BR/server.cjs" || {
+        echo "构建中止：bridge 缺工具分发 $needle" >&2; exit 1; }
+done
+# 5) 进度面板可交互：暂停/继续/停止/插话/handoff 确认卡走 /control
+for needle in 'sendControl' "BRIDGE + '/control'" 'handoffBox' 'interjectInput' \
+              "case 'paused'" 'snap.control' 'EventSource'; do
+    grep -qF "$needle" "$FR/assets/dsh-ios-live-progress.js" || {
+        echo "构建中止：进度面板缺交互要素 $needle" >&2; exit 1; }
+done
+node --check "$BR/server.cjs" || exit 1
+node --check "$FR/assets/dsh-ios-live-progress.js" || exit 1
+echo "    +ios24.9 断言通过（固定工具集 / 增量读屏 / 串行围栏 / 10 个新工具 / 面板交互）"
+
 for f in "$STAGE/var/jb/usr/bin/dsh" "$STAGE/var/jb/usr/bin/dsh-daemon" \
          "$STAGE/var/jb/usr/bin/dsh-app-ctl" "$STAGE/var/jb/usr/bin/dsh-app-ui" \
          "$STAGE/var/jb/usr/lib/dsh/dsh-extras-postinst.sh" \

@@ -4,7 +4,7 @@
 「最新 DSH + 像官方 App 一样点图标即用」的主交付。稳定底座
 （`build.sh` 产出的 `0.2.1-rc.5+ios15` / `0.2.2-rc.1+ios16`）一个字节都没动。
 
-## 档位：请装 `+ios24.8`
+## 档位：请装 `+ios24.9`
 
 | 档位 | 内置 Node | DSH | 状态 |
 | --- | --- | --- | --- |
@@ -17,7 +17,8 @@
 | `+ios24.5` | v24.19.0 + 免终端自启 | 0.2.2-rc.3 | **已被取代**：launchd 直接执行 dsh-daemon |
 | `+ios24.6` | v24.19.0 + 图片支持 + 手机操控 | 0.2.2-rc.3 | **已被取代**：修老对话 TRANSPORT（sharp 缺失）、图片上传、内置 ios-mcp + phone-bridge |
 | `+ios24.7` | v24.19.0 + 操控提速 + HUD + 自启兜底 | 0.2.2-rc.3 | **已被取代**：`phone_act` / `watch_screen` / `wait_for_change`、SpringBoard 实时进度胶囊（真机仍不可见） |
-| `+ios24.8` | v24.19.0 + 实时进度双通道 + 效率工具 | 0.2.2-rc.3 | **推荐**：进度主通道搬进 DSH 页面右下角卡片（SSE / 轮询 / DOM 观察三级兜底）、HUD 重编常驻可见、8090 冲突去重、`find_element` / `wait_for_text` / `progress_status` / 整批预校验 |
+| `+ios24.8` | v24.19.0 + 实时进度双通道 + 效率工具 | 0.2.2-rc.3 | **已被取代**：进度主通道搬进 DSH 页面右下角卡片（SSE / 轮询 / DOM 观察三级兜底）、HUD 重编常驻可见、8090 冲突去重、`find_element` / `wait_for_text` / `progress_status` / 整批预校验 |
+| `+ios24.9` | v24.19.0 + DSH Go 效率模型 | 0.2.2-rc.3 | **推荐**：固定工具集（KV cache 不再失效）、按行增量读屏 `sN` / `ui_verdict`、`phone_intent` / `phone_collect` / `phone_skill_*` / `phone_handoff` / `phone_batch`、串行队列与 epoch 围栏、进度面板暂停/停止/插话/确认卡 |
 
 **为什么 `+ios18` 是坏的**：rc.3 的 `package.json` 声明 `engines.node >= 24.9.0`，
 且 `lib/bin.js` 用了 `import.meta.main`（Node 24.2+ 才支持）。22.12.0 上
@@ -243,26 +244,31 @@ sh one-package/build-one-package.sh \
 node 二进制，可用 `NODE_IOS_BIN=/path/to/node` 指定；缺失时脚本会直接
 中止，绝不产出「装得上但起不来」的残包。
 
-当前正式档 `+ios24.8` 的实际构建命令（Node 24.19.0 arm64 成品来自 Actions
+当前正式档 `+ios24.9` 的实际构建命令（Node 24.19.0 arm64 成品来自 Actions
 `node24-ios-jit` / Release `node24-exp`）：
 
 ```sh
 NODE_IOS_BIN=/path/to/node-v24.19.0-iphoneos-arm64-jit \
-DSH_IOS_TAG=ios24.8 \
+DSH_IOS_TAG=ios24.9 \
   sh one-package/build-one-package.sh \
       bundles/dsh-nodemodules-0.2.2-rc.3+ios1.tar.gz \
       app-bundle/payload \
-      dist/dev.airdevs.dsh_0.2.2-rc.3+ios24.8_iphoneos-arm64.deb
+      dist/dev.airdevs.dsh_0.2.2-rc.3+ios24.9_iphoneos-arm64.deb
 
 # 第 8 章「两次构建字节级可复现」会重跑一遍构建，需带上同一个 NODE_IOS_BIN
 NODE_IOS_BIN=/path/to/node-v24.19.0-iphoneos-arm64-jit \
-DSH_IOS_TAG=ios24.8 sh one-package/verify-one-package.sh \
-    dist/dev.airdevs.dsh_0.2.2-rc.3+ios24.8_iphoneos-arm64.deb \
+DSH_IOS_TAG=ios24.9 sh one-package/verify-one-package.sh \
+    dist/dev.airdevs.dsh_0.2.2-rc.3+ios24.9_iphoneos-arm64.deb \
     bundles/dsh-nodemodules-0.2.2-rc.3+ios1.tar.gz app-bundle/payload
 ```
 
-`+ios24.8` 构建期会强制断言进度面板注入、SSE/轮询端点、效率工具、
-`ensure-config` 的 8090 去重、`ctl hud` 诊断，缺任一项直接中止出包。
+`+ios24.9` 构建期会强制断言进度面板注入、SSE/轮询端点、效率工具、
+`ensure-config` 的 8090 去重、`ctl hud` 诊断（以上沿用 `+ios24.8`），**并新增**
+固定工具集（`FIXED_TOOLS` / `tools: FIXED_TOOLS` / `fixed_toolset_note`）、按行增量
+读屏（`screenDigest` / `无法验证` / `ui_verdict`）、串行围栏（`runSerialized` /
+`controlApply` / `publicControlState` / epoch 检查）、10 个新工具的 `callLocal`
+分发，以及进度面板的 `sendControl` / `/control` / handoff 确认卡；所有断言同时对
+`server.cjs` 与面板做 `node --check`，缺任一项直接中止出包。
 HUD dylib 必须先在 `.github/workflows/build-native-hud.yml`（`macos-15`）
 重编归档，构建脚本会把它拷进包并校验 Mach-O magic。
 

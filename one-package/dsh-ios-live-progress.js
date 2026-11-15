@@ -66,6 +66,7 @@
             case 'idle': case 'ready': return { label: '待命', color: '#8b93a1', pulse: false };
             case 'thinking': return { label: '思考中', color: '#5b8def', pulse: true };
             case 'waiting': return { label: '等待界面', color: '#e0a53a', pulse: true };
+            case 'paused': return { label: '已暂停', color: '#e0a53a', pulse: false };
             case 'running': return { label: '执行中', color: '#33c759', pulse: true };
             case 'done': return { label: '已完成', color: '#33c759', pulse: false };
             case 'error': case 'failed': return { label: '失败', color: '#ff453a', pulse: false };
@@ -113,11 +114,25 @@
         '.dshlp-btn{pointer-events:auto;font-size:10.5px;padding:3px 8px;border-radius:8px;border:1px solid rgba(255,255,255,.16);',
         'background:rgba(255,255,255,.06);color:#f2f4f8;cursor:pointer;}',
         '.dshlp-link{font-size:10px;opacity:.55;margin-left:auto;}',
+        // +ios24.9：暂停/停止/插话 + 交还确认卡（对齐 DSH Go 悬浮条）
+        '.dshlp-ctl{padding:0 11px 8px;display:flex;gap:6px;align-items:center;flex-wrap:wrap;}',
+        '.dshlp-ctl .dshlp-btn.act{background:rgba(51,199,89,.18);border-color:rgba(51,199,89,.5);}',
+        '.dshlp-ctl .dshlp-btn.stop{background:rgba(255,69,58,.13);border-color:rgba(255,69,58,.45);}',
+        '.dshlp-input{flex:1;min-width:96px;font:11px/1.4 inherit;color:#f2f4f8;',
+        'background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.16);border-radius:8px;',
+        'padding:4px 7px;-webkit-user-select:text;user-select:text;}',
+        '.dshlp-input::placeholder{color:rgba(242,244,248,.4);}',
+        '.dshlp-handoff{margin:0 11px 8px;padding:8px 9px;border-radius:10px;',
+        'background:rgba(224,165,58,.14);border:1px solid rgba(224,165,58,.42);font-size:11.5px;line-height:1.45;}',
+        '.dshlp-handoff .why{color:#ffd88a;margin-bottom:7px;}',
+        '.dshlp-handoff .row{display:flex;gap:6px;}',
+        '.dshlp-hidden{display:none!important;}',
         '.dshlp-off{display:none!important;}'
     ].join('');
 
     // ---------- 构建 DOM ----------
     var root, card, dot, titleEl, stateEl, metaEl, caret, detailEl, bar, body, summaryEl, listEl, linkEl;
+    var ctlRow, pauseBtn, stopBtn, interjectInput, handoffBox, handoffWhy;
 
     function build() {
         root = document.getElementById(ID);
@@ -146,6 +161,48 @@
 
         detailEl = el('div', 'dshlp-detail', '正在连接进度通道…');
         var track = el('div', 'dshlp-track'); bar = el('div', 'dshlp-bar'); track.appendChild(bar);
+
+        // +ios24.9：暂停/继续、停止、插话（对齐 DSH Go 悬浮条胶囊与卡片）
+        ctlRow = el('div', 'dshlp-ctl');
+        pauseBtn = el('button', 'dshlp-btn', '暂停');
+        pauseBtn.addEventListener('click', function (ev) {
+            ev.stopPropagation();
+            var paused = !!(snap && snap.control && snap.control.paused);
+            sendControl(paused ? 'resume' : 'pause');
+        });
+        stopBtn = el('button', 'dshlp-btn stop', '停止');
+        stopBtn.addEventListener('click', function (ev) { ev.stopPropagation(); sendControl('stop'); });
+        interjectInput = el('input', 'dshlp-input');
+        interjectInput.type = 'text';
+        interjectInput.placeholder = '插话：换个做法…';
+        interjectInput.addEventListener('click', function (ev) { ev.stopPropagation(); });
+        interjectInput.addEventListener('keydown', function (ev) {
+            ev.stopPropagation();
+            if (ev.key === 'Enter' || ev.keyCode === 13) {
+                var t = interjectInput.value.trim();
+                if (t) { sendControl('interject', t); interjectInput.value = ''; }
+            }
+        });
+        var sendBtn = el('button', 'dshlp-btn', '发送');
+        sendBtn.addEventListener('click', function (ev) {
+            ev.stopPropagation();
+            var t = interjectInput.value.trim();
+            if (t) { sendControl('interject', t); interjectInput.value = ''; }
+        });
+        ctlRow.appendChild(pauseBtn); ctlRow.appendChild(stopBtn);
+        ctlRow.appendChild(interjectInput); ctlRow.appendChild(sendBtn);
+
+        // 交还用户确认卡：登录/验证码/支付等步骤由人来完成
+        handoffBox = el('div', 'dshlp-handoff dshlp-hidden');
+        handoffWhy = el('div', 'why', '');
+        var hoRow = el('div', 'row');
+        var hoCont = el('button', 'dshlp-btn act', '继续');
+        hoCont.addEventListener('click', function (ev) { ev.stopPropagation(); sendControl('continue'); });
+        var hoStop = el('button', 'dshlp-btn stop', '停止');
+        hoStop.addEventListener('click', function (ev) { ev.stopPropagation(); sendControl('stop'); });
+        hoRow.appendChild(hoCont); hoRow.appendChild(hoStop);
+        handoffBox.appendChild(handoffWhy); handoffBox.appendChild(hoRow);
+
         body = el('div', 'dshlp-body');
         summaryEl = el('div', 'dshlp-summary');
         listEl = el('ul', 'dshlp-list');
@@ -165,6 +222,7 @@
         foot.appendChild(toggle); foot.appendChild(clear); foot.appendChild(linkEl);
 
         card.appendChild(head); card.appendChild(detailEl); card.appendChild(track);
+        card.appendChild(ctlRow); card.appendChild(handoffBox);
         card.appendChild(body); card.appendChild(foot);
         root.appendChild(card);
         (document.body || document.documentElement).appendChild(root);
@@ -207,7 +265,8 @@
     function render() {
         if (!dot) return;
         var e = snap;
-        var ph = phaseOf(e);
+        var ctl = (e && e.control) || null;
+        var ph = (ctl && ctl.paused) ? 'paused' : phaseOf(e);
         var info = stateInfo(ph);
         dot.style.background = info.color;
         dot.className = 'dshlp-dot' + (info.pulse ? ' on' : '');
@@ -228,6 +287,67 @@
             metaEl.textContent = (ph === 'running' || ph === 'thinking' || ph === 'waiting')
                 ? fmtMs(liveElapsed()) : '';
         }
+
+        // +ios24.9：控制态渲染。SSE / 轮询的每个事件快照都带 control 字段。
+        if (pauseBtn) {
+            var paused = !!(ctl && ctl.paused);
+            pauseBtn.textContent = paused ? '继续' : '暂停';
+            pauseBtn.className = 'dshlp-btn' + (paused ? ' act' : '');
+        }
+        if (handoffBox) {
+            var ho = ctl && ctl.handoff;
+            if (ho) {
+                handoffBox.className = 'dshlp-handoff';
+                handoffWhy.textContent = '需要你来操作：' + (ho.reason || '完成这一步，然后点继续');
+            } else {
+                handoffBox.className = 'dshlp-handoff dshlp-hidden';
+            }
+        }
+    }
+
+    // 把暂停/继续/停止/插话送回 bridge 的 /control。XHR 优先，fetch 兜底，
+    // 全部静默失败（控制不可用时不影响 DSH 本身使用），并做乐观渲染。
+    function sendControl(action, text) {
+        var payload = { action: action };
+        if (text) payload.text = text;
+        var body = JSON.stringify(payload);
+        var apply = function (j) {
+            if (!j || !j.control) return;
+            if (!snap) snap = { state: 'running' };
+            snap.control = j.control;
+            render();
+        };
+        try {
+            var xhr = new XMLHttpRequest();
+            xhr.open('POST', BRIDGE + '/control', true);
+            xhr.setRequestHeader('Content-Type', 'application/json');
+            xhr.timeout = 3000;
+            xhr.onreadystatechange = function () {
+                if (xhr.readyState === 4 && xhr.status === 200) {
+                    try { apply(JSON.parse(xhr.responseText)); } catch (_) {}
+                }
+            };
+            xhr.send(body);
+        } catch (_) {
+            try {
+                if (typeof fetch === 'function') {
+                    fetch(BRIDGE + '/control', {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: body
+                    }).then(function (r) { return r.json(); }).then(apply).catch(function () {});
+                }
+            } catch (_) {}
+        }
+        // 乐观更新：按钮与确认卡不等网络回包
+        if (!snap) snap = { state: 'running' };
+        if (!snap.control) snap.control = {};
+        if (action === 'pause') snap.control.paused = true;
+        if (action === 'resume' || action === 'continue') {
+            snap.control.paused = false; snap.control.handoff = null;
+        }
+        if (action === 'stop') {
+            snap.control.paused = false; snap.control.handoff = null;
+        }
+        render();
     }
 
     function liveElapsed() {
