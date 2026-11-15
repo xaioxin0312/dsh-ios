@@ -1,0 +1,33 @@
+#!/bin/sh
+# dsh-autostart-agent —— 用户会话（SpringBoard 启动）兜底拉起 DSH。
+#
+# 背景：少数 rootless 环境下系统域的 /var/jb/Library/LaunchDaemons 没被
+# launchd 扫描，导致开机后必须手动敲 dsh。本脚本作为 LaunchAgent
+# （LimitLoadToSessionType=Aqua）随用户会话启动：
+#   - 3080 已可达 -> 什么都不做，退出 0；
+#   - 否则 exec dsh-daemon，由 launchd 接管这一个 PID。
+# KeepAlive 用 SuccessfulExit=false，因此「探测到已就绪」不会导致重启风暴。
+JB=/var/jb
+export HOME="${HOME:-/var/mobile}"
+export PATH="$JB/usr/bin:$JB/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+LOG="$JB/var/log/dsh-app"
+mkdir -p "$LOG" 2>/dev/null || true
+
+TOKEN=$(cat "$JB/usr/lib/dsh/webclip/token" 2>/dev/null | tr -d '\r\n')
+[ -n "$TOKEN" ] || TOKEN=dshios-fixed-token-8f3a2c
+PORT="${DSH_WEB_PORT:-3080}"
+
+if [ -x "$JB/usr/lib/dsh/node-safe" ]; then
+    "$JB/usr/lib/dsh/node-safe" -e '
+      const http=require("http");
+      const req=http.get({host:"127.0.0.1",port:Number(process.argv[1]),
+        path:"/?token="+encodeURIComponent(process.argv[2]),timeout:1200},r=>{
+        r.resume(); process.exit((r.statusCode===303||r.statusCode===200)?0:1);
+      });
+      req.on("error",()=>process.exit(1));
+      req.on("timeout",()=>{req.destroy();process.exit(1)});
+    ' "$PORT" "$TOKEN" >/dev/null 2>&1 && exit 0
+fi
+
+echo "dsh-autostart-agent: web not reachable on $PORT, starting daemon at $(date)" >> "$LOG/autostart.log"
+exec "$JB/usr/bin/dsh-daemon"

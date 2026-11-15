@@ -329,6 +329,14 @@ mkdir -p "$DL" "$STAGE/var/jb/usr/lib/dsh-phone-bridge" \
          "$STAGE/var/jb/usr/share/doc/dev.airdevs.dsh"
 cp "$NATIVE/prebuilt/dsh-ios-control.dylib" "$DL/dsh-ios-control.dylib"
 cp "$NATIVE/dsh-ios-control.plist"          "$DL/dsh-ios-control.plist"
+# +ios24.7 实时进度胶囊（SpringBoard 注入，只读 hud.json，不开端口）
+if [ -f "$NATIVE/hud/dsh-ios-hud.dylib" ]; then
+    cp "$NATIVE/hud/dsh-ios-hud.dylib" "$DL/dsh-ios-hud.dylib"
+    cp "$NATIVE/hud/dsh-ios-hud.plist" "$DL/dsh-ios-hud.plist"
+else
+    echo "缺 Native HUD 产物：$NATIVE/hud/dsh-ios-hud.dylib（先跑 build-native-hud workflow）" >&2
+    exit 1
+fi
 cp "$NATIVE/prebuilt/mcp-logreader"         "$STAGE/var/jb/usr/bin/mcp-logreader"
 cp "$PB/server.cjs" "$PB/ensure-config.cjs" "$STAGE/var/jb/usr/lib/dsh-phone-bridge/"
 cp "$PB/dsh-phone-bridge-daemon" "$PB/dsh-phone-bridge-ctl" "$STAGE/var/jb/usr/bin/"
@@ -337,9 +345,13 @@ cp "$NATIVE/LICENSE-ios-mcp" "$NATIVE/NOTICE" "$STAGE/var/jb/usr/share/doc/dev.a
 cp "$PB/README.md" "$STAGE/var/jb/usr/share/doc/dev.airdevs.dsh/phone-bridge-README.md"
 chmod 755 "$STAGE/var/jb/usr/bin/mcp-logreader" \
           "$STAGE/var/jb/usr/bin/dsh-phone-bridge-daemon" \
-          "$STAGE/var/jb/usr/bin/dsh-phone-bridge-ctl"
+          "$STAGE/var/jb/usr/bin/dsh-phone-bridge-ctl" \
+          "$STAGE/var/jb/usr/bin/dsh-autostart" \
+          "$STAGE/var/jb/usr/bin/dsh-autostart-agent"
 chmod 644 "$DL/dsh-ios-control.dylib" "$DL/dsh-ios-control.plist" \
+          "$DL/dsh-ios-hud.dylib" "$DL/dsh-ios-hud.plist" \
           "$STAGE/var/jb/usr/lib/dsh-phone-bridge/"*.cjs \
+          "$STAGE/var/jb/Library/LaunchAgents/dev.airdevs.dsh.agent.plist" \
           "$STAGE/var/jb/Library/LaunchDaemons/dev.airdevs.dsh.phone-bridge.plist"
 echo "    手机操控：原生 8090 + bridge 8091 + 开机自启 + 自动注册 MCP"
 
@@ -369,14 +381,32 @@ fi
 # +ios24.x 的 changelog 只写在 stage 副本里：共享 control 原文件一个字节不动。
 # +ios18 是已冻结的对照档（927b5308…），当前源码面向 +ios24.6，不再承诺
 # 从当前 HEAD 重新构建 +ios18 能 1:1 复现当时的历史产物。
-case "$TAG" in ios24.1|ios24.2|ios24.3|ios24.4|ios24.5|ios24.6) ;; *) skip_changelog=1 ;; esac
+case "$TAG" in ios24.1|ios24.2|ios24.3|ios24.4|ios24.5|ios24.6|ios24.7) ;; *) skip_changelog=1 ;; esac
 if [ "${skip_changelog:-0}" != "1" ]; then
     python3 - "$STAGE/DEBIAN/control" "$TAG" <<'PY'
 import sys
 p, tag = sys.argv[1:3]
 s = open(p, encoding='utf-8').read()
 extra = ""
-if tag == "ios24.6":
+if tag == "ios24.7":
+    extra = """ * 手机操控提速：phone_act 一次调用执行整串动作（点按/输入/滑动/
+   按键/回主屏/打开 App/等待），随后等待界面稳定并返回精简 UI，把原来
+   5~10 次模型往返压成 1 次；bridge 不再在每次 tools/call 前强制
+   initialize + tools/list（旧实现每次多 3 个回环请求）；
+ * watch_screen / wait_for_change：原生连续采集 1~6fps，帧差检测 + 关键帧
+   + Vision OCR，一次调用返回「第几秒画面变了」的事件时间线，用于看视频/
+   动画/加载进度，而不是让模型轮询截图；
+ * 灵动岛实时进度：新增 dsh-ios-hud.dylib 注入 SpringBoard，顶部胶囊
+   实时显示当前动作、第 n/N 步、耗时与进度线；bridge 以原子文件写入
+   进度，HUD 未加载时不影响任何操控链路；
+ * 自启兜底：新增 LaunchAgent（用户会话）与 dsh-autostart status/repair，
+   系统域 launchd 未扫描 /var/jb/Library/LaunchDaemons 时由 SpringBoard
+   启动时自动拉起，装完不再需要终端敲 dsh；
+ * 保留 +ios24.6 的图片支持与内置手机操控、+ios24.5 的 launchd 免终端、
+   +ios24.4 的 corrupt 会话恢复、+ios24.3 的 profile 核心包隔离、
+   +ios24.2 的 zstd→none 与 browse。
+"""
+elif tag == "ios24.6":
     extra = """ * 图片支持（读取 + 上传，全程不依赖 sharp 原生库）：rc.3 的
    prepareImages() 会遍历历史里每一张图片并调用 readImageRequest()，
    而该链路依赖 sharp；iOS 包只有 JS 壳，任一历史图片都会在请求发出前
@@ -533,6 +563,37 @@ node --check "$STAGE/var/jb/usr/lib/dsh-phone-bridge/server.cjs" || exit 1
 node --check "$STAGE/var/jb/usr/lib/dsh-phone-bridge/ensure-config.cjs" || exit 1
 node --check "$STAGE/var/jb/usr/lib/dsh/ios-image-shim.mjs" || exit 1
 echo "    图片支持 / 手机操控断言通过（preload + 原生层 + bridge + 自动注册）"
+
+# +ios24.7：实时进度 HUD + 组合动作 + 自启兜底（缺任何一件都不允许出包）
+for f in \
+  "$STAGE/var/jb/Library/MobileSubstrate/DynamicLibraries/dsh-ios-hud.dylib" \
+  "$STAGE/var/jb/Library/MobileSubstrate/DynamicLibraries/dsh-ios-hud.plist" \
+  "$STAGE/var/jb/usr/bin/dsh-autostart" \
+  "$STAGE/var/jb/usr/bin/dsh-autostart-agent" \
+  "$STAGE/var/jb/Library/LaunchAgents/dev.airdevs.dsh.agent.plist"; do
+    [ -e "$f" ] || { echo "构建中止：缺 $f" >&2; exit 1; }
+done
+HM=$(od -An -tx1 -N4 "$STAGE/var/jb/Library/MobileSubstrate/DynamicLibraries/dsh-ios-hud.dylib" 2>/dev/null | tr -d ' \n')
+[ "$HM" = "cffaedfe" ] || { echo "构建中止：dsh-ios-hud.dylib 不是 arm64 Mach-O (magic=$HM)" >&2; exit 1; }
+python3 - "$STAGE/var/jb/Library/MobileSubstrate/DynamicLibraries/dsh-ios-hud.plist" <<'PY'
+import plistlib, sys
+d = plistlib.load(open(sys.argv[1], 'rb'))
+assert 'com.apple.springboard' in d['Filter']['Bundles'], 'HUD 未过滤 SpringBoard'
+print('    HUD 注入目标 = SpringBoard')
+PY
+grep -q 'dsh-ios-hud.dylib' "$STAGE/var/jb/usr/lib/dsh/dsh-extras-postinst.sh" || {
+    echo "构建中止：extras-postinst 未给 HUD 授权/sign" >&2; exit 1; }
+grep -q "phone_act" "$STAGE/var/jb/usr/lib/dsh-phone-bridge/server.cjs" || {
+    echo "构建中止：bridge 缺 phone_act 组合动作" >&2; exit 1; }
+grep -q "watch_screen" "$STAGE/var/jb/usr/lib/dsh-phone-bridge/server.cjs" || {
+    echo "构建中止：bridge 缺 watch_screen 看屏工具" >&2; exit 1; }
+grep -q "hudPublish" "$STAGE/var/jb/usr/lib/dsh-phone-bridge/server.cjs" || {
+    echo "构建中止：bridge 缺实时进度上报" >&2; exit 1; }
+grep -q "upstreamTools(false)" "$STAGE/var/jb/usr/lib/dsh-phone-bridge/server.cjs" || {
+    echo "构建中止：bridge 仍在每次 tools/call 强制刷新工具列表" >&2; exit 1; }
+sh -n "$STAGE/var/jb/usr/bin/dsh-autostart" || exit 1
+sh -n "$STAGE/var/jb/usr/bin/dsh-autostart-agent" || exit 1
+echo "    实时进度 / 组合动作 / 自启兜底断言通过"
 for f in "$STAGE/var/jb/usr/bin/dsh" "$STAGE/var/jb/usr/bin/dsh-daemon" \
          "$STAGE/var/jb/usr/bin/dsh-app-ctl" "$STAGE/var/jb/usr/bin/dsh-app-ui" \
          "$STAGE/var/jb/usr/lib/dsh/dsh-extras-postinst.sh" \

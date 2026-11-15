@@ -1,0 +1,146 @@
+#!/bin/sh
+# dsh-autostart —— 诊断 / 修复「装完 deb 还要终端敲 dsh」。
+#
+#   dsh-autostart status   看系统 daemon、用户 agent、端口、日志
+#   dsh-autostart repair   重写权限并重新 bootstrap 两级 launchd
+#   dsh-autostart logs     直接看 daemon / agent 日志尾部
+#
+# 退出码：0 表示当前 3080 已用固定 token 放行（303/200），1 表示仍未就绪。
+set -u
+JB=/var/jb
+D="$JB/usr/lib/dsh"
+LOGDIR="$JB/var/log/dsh-app"
+PL="$JB/Library/LaunchDaemons/dev.airdevs.dsh.plist"
+AG="$JB/Library/LaunchAgents/dev.airdevs.dsh.agent.plist"
+TOKEN=$(cat "$D/webclip/token" 2>/dev/null | tr -d '\r\n')
+[ -n "$TOKEN" ] || TOKEN=dshios-fixed-token-8f3a2c
+PORT="${DSH_WEB_PORT:-3080}"
+UID_MOBILE=501
+
+LC=""
+for c in "$JB/usr/bin/launchctl" "$JB/bin/launchctl" /usr/bin/launchctl /bin/launchctl; do
+    [ -x "$c" ] && { LC="$c"; break; }
+done
+
+say() { printf '%s\n' "$*"; }
+ok()  { say "[ok]   $*"; }
+bad() { say "[FAIL] $*"; }
+warn(){ say "[warn] $*"; }
+
+probe() {
+    [ -x "$D/node-safe" ] || return 1
+    "$D/node-safe" -e '
+      const http=require("http");
+      const req=http.get({host:"127.0.0.1",port:Number(process.argv[1]),
+        path:"/?token="+encodeURIComponent(process.argv[2]),timeout:1500},r=>{
+        r.resume(); process.exit((r.statusCode===303||r.statusCode===200)?0:1);
+      });
+      req.on("error",()=>process.exit(1));
+      req.on("timeout",()=>{req.destroy();process.exit(1)});
+    ' "$PORT" "$TOKEN" >/dev/null 2>&1
+}
+
+show_file() {
+    f=$1
+    if [ ! -f "$f" ]; then bad "缺文件 $f"; return 1; fi
+    ok "存在 $f ($(stat -c '%U:%G %a' "$f" 2>/dev/null || echo '?'))"
+}
+
+job_state() {
+    dom=$1
+    label=$2
+    [ -n "$LC" ] || return 1
+    out=$("$LC" print "$dom/$label" 2>&1)
+    if [ $? -ne 0 ]; then
+        bad "$dom/$label 未加载"
+        printf '%s\n' "$out" | sed -n '1,3p'
+        return 1
+    fi
+    ok "$dom/$label 已加载"
+    printf '%s\n' "$out" | grep -E 'state = |pid = |last exit code|program = ' | sed -n '1,6p'
+}
+
+cmd_status() {
+    say "== 文件 =="
+    show_file "$PL" || true
+    show_file "$AG" || true
+    show_file "$JB/usr/bin/dsh-daemon" || true
+    show_file "$JB/usr/bin/dsh-autostart-agent" || true
+    show_file "$D/dsh-ios-hud.dylib" || true
+
+    say "== 系统 daemon =="
+    job_state system dev.airdevs.dsh || true
+    say "== 用户 agent =="
+    job_state gui/$UID_MOBILE dev.airdevs.dsh.agent || true
+
+    say "== 端口 =="
+    if probe; then ok "127.0.0.1:$PORT 已用固定 token 放行"; else bad "127.0.0.1:$PORT 不可达"; fi
+
+    say "== 日志 =="
+    for f in "$LOGDIR/dsh-daemon.err.log" "$LOGDIR/agent.err.log" "$LOGDIR/autostart.log"; do
+        [ -f "$f" ] && { say "-- $f"; tail -n 12 "$f"; }
+    done
+    if probe; then return 0; fi
+    return 1
+}
+
+cmd_repair() {
+    [ -n "$LC" ] || { bad "找不到 launchctl"; return 1; }
+    mkdir -p "$LOGDIR" 2>/dev/null || true
+    chown 0:0 "$PL" 2>/dev/null || true
+    chmod 644 "$PL" 2>/dev/null || true
+
+    # 系统域
+    for L in dev.airdevs.dsh dev.airdevs.dsh-app; do
+        "$LC" bootout "system/$L" >/dev/null 2>&1 || true
+        "$LC" unload -w "$JB/Library/LaunchDaemons/$L.plist" >/dev/null 2>&1 || true
+    done
+    out=$("$LC" bootstrap system "$PL" 2>&1)
+    if [ $? -ne 0 ]; then
+        warn "bootstrap system 失败：$out"
+        out2=$("$LC" load -w "$PL" 2>&1)
+        [ $? -eq 0 ] && ok "legacy load 成功" || warn "legacy load 也失败：$out2"
+    else
+        ok "bootstrap system 成功"
+    fi
+    "$LC" kickstart -k system/dev.airdevs.dsh >/dev/null 2>&1 || true
+
+    # 用户会话域（兜底）
+    if [ -f "$AG" ]; then
+        chown 0:0 "$AG" 2>/dev/null || true
+        chmod 644 "$AG" 2>/dev/null || true
+        "$LC" bootout "gui/$UID_MOBILE/dev.airdevs.dsh.agent" >/dev/null 2>&1 || true
+        out=$("$LC" bootstrap "gui/$UID_MOBILE" "$AG" 2>&1)
+        if [ $? -ne 0 ]; then
+            warn "bootstrap gui/$UID_MOBILE 失败：$out（尝试 user 域）"
+            out2=$("$LC" bootstrap "user/$UID_MOBILE" "$AG" 2>&1)
+            [ $? -eq 0 ] && ok "user 域 bootstrap 成功" || warn "user 域也失败：$out2"
+        else
+            ok "bootstrap gui/$UID_MOBILE 成功"
+        fi
+    fi
+
+    i=0
+    while [ "$i" -lt 40 ]; do
+        if probe; then ok "DSH Web 已就绪（$PORT）"; return 0; fi
+        i=$((i + 1))
+        sleep 0.5 2>/dev/null || sleep 1
+    done
+    bad "20s 内未就绪；查看 dsh-autostart logs"
+    return 1
+}
+
+cmd_logs() {
+    for f in "$LOGDIR/dsh-daemon.err.log" "$LOGDIR/dsh-daemon.out.log" "$LOGDIR/agent.err.log" "$LOGDIR/autostart.log"; do
+        [ -f "$f" ] || continue
+        say "== $f"
+        tail -n 40 "$f"
+    done
+}
+
+case "${1:-status}" in
+    status) cmd_status ;;
+    repair) cmd_repair && { sleep 0.2; cmd_status; } ;;
+    logs) cmd_logs ;;
+    *) say "usage: dsh-autostart [status|repair|logs]"; exit 2 ;;
+esac

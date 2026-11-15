@@ -1,0 +1,26 @@
+name: build-native-hud
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'phone-bridge/native/hud/**'
+      - '.github/workflows/build-native-hud.yml'
+
+jobs:
+  hud:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build dsh-ios-hud.dylib
+        run: |
+          set -eux
+          chmod +x phone-bridge/native/hud/build-hud.sh
+          sh phone-bridge/native/hud/build-hud.sh "$PWD/dsh-ios-hud.dylib"
+          lipo -info dsh-ios-hud.dylib || true
+          ls -l dsh-ios-hud.dylib
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dsh-ios-hud
+          path: dsh-ios-hud.dylib
+          if-no-files-found: error

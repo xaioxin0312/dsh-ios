@@ -44,6 +44,36 @@ const MAX_OUTPUT = 64 * 1024;
 const MAX_FILE = 2 * 1024 * 1024;
 const CMD_TIMEOUT = Number(process.env.DSH_BRIDGE_CMD_TIMEOUT || 60000);
 
+/* ------------------------------------------------- 实时进度（灵动岛悬浮胶囊）
+ * 原生层 dsh-ios-hud.dylib 注入 SpringBoard，200ms 轮询这个文件并把状态画到
+ * 屏幕顶部。bridge 只用「写临时文件 + rename」的原子写法，不依赖任何 IPC，
+ * 因此 HUD 没装/没加载时调用链完全不受影响。
+ */
+const HUD_PATH = process.env.DSH_HUD_PATH || '/var/mobile/Library/DSH/hud.json';
+let hudStart = 0;
+function hudPublish(state, detail, extra) {
+    const e = extra || {};
+    if (state === 'running' && !hudStart) hudStart = Date.now();
+    const obj = {
+        v: 1,
+        state,
+        title: e.title || 'DSH 操控中',
+        detail: String(detail || '').slice(0, 90),
+        step: Number(e.step || 0),
+        total: Number(e.total || 0),
+        elapsed_ms: hudStart ? Date.now() - hudStart : 0,
+        ts: Date.now(),
+        ttl_ms: Number(e.ttl || (state === 'running' ? 30000 : 1600))
+    };
+    if (state !== 'running') hudStart = 0;
+    try {
+        fs.mkdirSync(path.dirname(HUD_PATH), { recursive: true });
+        const tmp = HUD_PATH + '.tmp';
+        fs.writeFileSync(tmp, JSON.stringify(obj));
+        fs.renameSync(tmp, HUD_PATH);
+    } catch (_) { /* HUD 不可用时静默 */ }
+}
+
 function tool(name, description, properties, required) {
     return {
         name,
@@ -68,7 +98,54 @@ const LOCAL_TOOLS = [
     tool('list_processes', 'List running processes (ps), optionally filtered.', { filter: S('optional grep filter') }),
     tool('get_syslog', 'Best-effort read of system log; returns a clear hint when no log tool is available.', { lines: N('max lines, default 200') }),
     tool('dsh_status', 'Report whether the DSH web service / daemon / this bridge are reachable.', { port: N('DSH web port, default 3080') }),
-    tool('phone_bridge_status', 'Report this bridge: local tool count, upstream ios-mcp reachability and merged tool count.', {})
+    tool('phone_bridge_status', 'Report this bridge: local tool count, upstream ios-mcp reachability and merged tool count.', {}),
+    tool('phone_act',
+        'Run a batch of UI actions in ONE call, then wait for the screen to settle and return the resulting UI. ' +
+        'Use this instead of many single-step tool calls: fewer model round trips, and progress streams to the Dynamic Island HUD. ' +
+        'Steps run in order: tap (text or x/y), type, swipe, key, home, open, wait, ocr.',
+        {
+            steps: {
+                type: 'array',
+                description: 'ordered actions, e.g. [{"action":"tap","text":"发送"},{"action":"type","text":"hello"}]',
+                items: {
+                    type: 'object',
+                    properties: {
+                        action: S('tap | type | swipe | key | home | open | wait | ocr'),
+                        text: S('tap: element text to tap; type: text to type'),
+                        x: N('tap: x point'), y: N('tap: y point'),
+                        from_x: N('swipe start x'), from_y: N('swipe start y'),
+                        to_x: N('swipe end x'), to_y: N('swipe end y'),
+                        duration_ms: N('swipe duration'),
+                        key: S('key name for key action, e.g. return/backspace'),
+                        bundle_id: S('open: bundle id or URL'),
+                        ms: N('wait: milliseconds')
+                    },
+                    required: ['action']
+                }
+            },
+            observe: B('return compact UI elements after the screen settles (default true)'),
+            screenshot: B('also return a final screenshot (default false)'),
+            settle_ms: N('screen settle timeout in ms, default 2500'),
+            clickable_only: B('only clickable elements in the returned UI, default true')
+        }, ['steps']),
+    tool('watch_screen',
+        'Watch the screen for a short window without model round trips: capture frames at 1-6 fps, detect scene changes, ' +
+        'and return a change timeline plus keyframe images (and OCR text when ocr=true). ' +
+        'Best for "watching" video/animation progress: the model gets events, not 30fps frames.',
+        {
+            fps: N('capture rate 1-6, default 3'),
+            duration_ms: N('window length 500-8000, default 3000'),
+            max_keyframes: N('max keyframe images returned, default 3'),
+            ocr: B('OCR changed frames (vision engine), default true'),
+            region: S('optional region "x,y,w,h" (reserved)')
+        }, []),
+    tool('wait_for_change',
+        'Wait until the screen changes (pixel-level) or timeout. Much faster than a fixed sleep after tapping.',
+        {
+            timeout_ms: N('max wait, default 5000'),
+            poll_ms: N('poll interval, default 120'),
+            min_bytes: N('minimum JPEG byte delta to count as change, default 200')
+        }, [])
 ];
 
 /* B 层工具名（上游在线时动态合并，离线时作为「需要 ios-mcp」的提示清单） */
@@ -146,6 +223,225 @@ async function listApps(extra) {
         }
     }
     return out;
+}
+
+const crypto = require('node:crypto');
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const STEP_LABEL = { tap: '点按', type: '输入', swipe: '滑动', key: '按键', home: '回主屏', open: '打开', wait: '等待', ocr: '识别' };
+
+function shotOf(result) {
+    const list = result && Array.isArray(result.content) ? result.content : [];
+    const img = list.find((c) => c && c.type === 'image' && c.data);
+    if (!img) return null;
+    return { data: img.data, mimeType: img.mimeType || 'image/jpeg' };
+}
+
+function uiOf(result) {
+    if (!result) return null;
+    if (result.structuredContent) return result.structuredContent;
+    const list = Array.isArray(result.content) ? result.content : [];
+    const t = list.find((c) => c && c.type === 'text');
+    if (!t) return null;
+    try { return JSON.parse(t.text); } catch (_) { return { raw: t.text }; }
+}
+
+async function shotHash() {
+    const r = await upstreamCall('screenshot', {});
+    const s = shotOf(r);
+    if (!s) return null;
+    return { hash: crypto.createHash('sha1').update(s.data).digest('hex'), bytes: s.data.length, shot: s };
+}
+
+async function nativeOk(name, args) {
+    const r = await upstreamCall(name, args);
+    return { ok: !(r && r.isError), result: r };
+}
+
+function stepText(s) {
+    const a = s.action;
+    if (a === 'tap') return s.text ? s.text : (s.x + ',' + s.y);
+    if (a === 'type') return String(s.text || '').slice(0, 20);
+    if (a === 'open') return String(s.bundle_id || '');
+    if (a === 'wait') return (Number(s.ms) || 0) + 'ms';
+    if (a === 'key') return String(s.key || '');
+    return '';
+}
+
+async function runStep(s) {
+    const a = String(s.action || '').toLowerCase();
+    const t0 = Date.now();
+    let r;
+    switch (a) {
+        case 'tap':
+            if (s.text) r = await nativeOk('tap_element', { text: String(s.text) });
+            else if (s.x !== undefined && s.y !== undefined) r = await nativeOk('tap_screen', { x: Number(s.x), y: Number(s.y) });
+            else return { action: a, ok: false, error: 'tap needs text or x/y', ms: 0 };
+            break;
+        case 'type': {
+            const text = String(s.text === undefined ? '' : s.text);
+            r = await nativeOk('input_text', { text });
+            if (!r.ok) r = await nativeOk('type_text', { text });
+            break;
+        }
+        case 'swipe':
+            r = await nativeOk('swipe_screen', {
+                fromX: Number(s.from_x), fromY: Number(s.from_y),
+                toX: Number(s.to_x), toY: Number(s.to_y),
+                duration: Number(s.duration_ms) || 0.3
+            });
+            break;
+        case 'key':
+            r = await nativeOk('press_key', { key: String(s.key || 'return') });
+            break;
+        case 'home':
+            r = await nativeOk('press_home', {});
+            break;
+        case 'open':
+            r = await nativeOk('launch_app', { bundle_id: String(s.bundle_id || '') });
+            break;
+        case 'wait':
+            await sleep(Math.min(Number(s.ms) || 300, 10000));
+            return { action: a, ok: true, ms: Date.now() - t0 };
+        case 'ocr':
+            r = await nativeOk('ocr_screen', { engine: 'vision' });
+            break;
+        default:
+            return { action: a, ok: false, error: 'unknown action: ' + a, ms: 0 };
+    }
+    return { action: a, ok: r.ok, ms: Date.now() - t0 };
+}
+
+async function settle(ms, clickableOnly) {
+    const deadline = Date.now() + Math.min(Math.max(Number(ms) || 2500, 300), 8000);
+    let prev = '';
+    let stable = 0;
+    while (Date.now() < deadline) {
+        const r = await upstreamCall('get_ui_elements', { clickable_only: !!clickableOnly, limit: 80 });
+        const ui = uiOf(r);
+        const key = ui ? crypto.createHash('sha1').update(JSON.stringify(ui)).digest('hex') : '';
+        if (key && key === prev) {
+            stable += 1;
+            if (stable >= 2) return ui;
+        } else {
+            stable = 0;
+            prev = key;
+        }
+        await sleep(140);
+    }
+    const r = await upstreamCall('get_ui_elements', { clickable_only: !!clickableOnly, limit: 80 });
+    return uiOf(r);
+}
+
+async function phoneAct(a) {
+    const steps = Array.isArray(a.steps) ? a.steps.slice(0, 40) : [];
+    if (!steps.length) return err('steps must be a non-empty array');
+    const total = steps.length;
+    const out = [];
+    for (let i = 0; i < total; i++) {
+        const s = steps[i] || {};
+        hudPublish('running', `第 ${i + 1}/${total} 步：${STEP_LABEL[String(s.action || '').toLowerCase()] || s.action} ${stepText(s)}`.trim(),
+            { step: i + 1, total });
+        const r = await runStep(s);
+        out.push(r);
+        if (!r.ok) {
+            hudPublish('error', `第 ${i + 1} 步失败：${stepText(s) || s.action}`, { step: i + 1, total });
+            return textResult({ ok: false, failed_at: i + 1, steps: out }, true);
+        }
+    }
+    hudPublish('running', '等待界面稳定…', { step: total, total });
+    const observe = a.observe !== false;
+    const ui = observe ? await settle(a.settle_ms, a.clickable_only !== false) : null;
+    const payload = { ok: true, steps: out, settled_ui: ui };
+    if (a.screenshot) {
+        const sh = await shotHash();
+        if (sh) {
+            hudPublish('done', `${total} 步完成 · ${sh.bytes}B 画面`, { step: total, total });
+            return {
+                content: [{ type: 'text', text: JSON.stringify(payload).slice(0, MAX_OUTPUT) },
+                          { type: 'image', data: sh.shot.data, mimeType: sh.shot.mimeType }]
+            };
+        }
+    }
+    hudPublish('done', `${total} 步完成`, { step: total, total });
+    return textResult(payload);
+}
+
+async function watchScreen(a) {
+    const fps = Math.min(Math.max(Number(a.fps) || 3, 1), 6);
+    const windowMs = Math.min(Math.max(Number(a.duration_ms) || 3000, 500), 8000);
+    const maxKf = Math.min(Math.max(Number(a.max_keyframes) || 3, 0), 5);
+    const wantOcr = a.ocr !== false;
+    const interval = Math.round(1000 / fps);
+    const t0 = Date.now();
+    const timeline = [];
+    const keyframes = [];
+    const ocr = [];
+    let lastHash = '';
+    let frames = 0;
+    let prevBytes = 0;
+    hudPublish('running', `看屏 ${fps}fps · ${windowMs}ms`, {});
+    while (Date.now() - t0 < windowMs) {
+        const tick = Date.now();
+        const sh = await shotHash();
+        if (sh) {
+            frames += 1;
+            if (sh.hash !== lastHash) {
+                const delta = lastHash ? Math.abs(sh.bytes - prevBytes) : sh.bytes;
+                lastHash = sh.hash;
+                prevBytes = sh.bytes;
+                const rec = { t_ms: tick - t0, delta_bytes: delta };
+                timeline.push(rec);
+                if (keyframes.length < maxKf) {
+                    keyframes.push({ t_ms: rec.t_ms, data: sh.shot.data, mimeType: sh.shot.mimeType });
+                    if (wantOcr && ocr.length < maxKf) {
+                        const o = await nativeOk('ocr_screen', { engine: 'vision' });
+                        if (o.ok) {
+                            const ui = uiOf(o.result);
+                            const text = ui ? JSON.stringify(ui) : (o.result.content && o.result.content[0] && o.result.content[0].text) || '';
+                            ocr.push({ t_ms: rec.t_ms, text: String(text).slice(0, 2000) });
+                        }
+                    }
+                }
+            }
+        }
+        const wait = interval - (Date.now() - tick);
+        if (wait > 0) await sleep(wait);
+    }
+    const summary = {
+        window_ms: windowMs, fps, frames_captured: frames,
+        changes: timeline.length,
+        timeline: timeline.slice(0, 40),
+        ocr,
+        keyframes_returned: keyframes.length,
+        note: 'Pixel-level changes only; keyframes are the first changed frames.'
+    };
+    hudPublish('done', `${frames} 帧 · ${timeline.length} 次变化`, {});
+    const content = [{ type: 'text', text: JSON.stringify(summary).slice(0, MAX_OUTPUT) }];
+    for (const k of keyframes) content.push({ type: 'image', data: k.data, mimeType: k.mimeType });
+    return { content };
+}
+
+async function waitForChange(a) {
+    const timeout = Math.min(Math.max(Number(a.timeout_ms) || 5000, 200), 30000);
+    const poll = Math.min(Math.max(Number(a.poll_ms) || 120, 60), 1000);
+    const minDelta = Number(a.min_bytes) || 200;
+    const t0 = Date.now();
+    const base = await shotHash();
+    if (!base) return err('screenshot unavailable (native provider offline?)');
+    hudPublish('running', '等待画面变化…', {});
+    let polls = 0;
+    while (Date.now() - t0 < timeout) {
+        await sleep(poll);
+        polls += 1;
+        const cur = await shotHash();
+        if (cur && cur.hash !== base.hash && Math.abs(cur.bytes - base.bytes) >= minDelta) {
+            hudPublish('done', `画面已变化 · ${Date.now() - t0}ms`, {});
+            return textResult({ changed: true, elapsed_ms: Date.now() - t0, polls, bytes_delta: cur.bytes - base.bytes });
+        }
+    }
+    hudPublish('done', '未检测到变化', {});
+    return textResult({ changed: false, elapsed_ms: Date.now() - t0, polls });
 }
 
 async function callLocal(name, args) {
@@ -265,6 +561,12 @@ async function callLocal(name, args) {
                 b_class_offline_hint: up.length === 0 ? UPSTREAM_HINT_TOOLS : []
             });
         }
+        case 'phone_act':
+            return phoneAct(a);
+        case 'watch_screen':
+            return watchScreen(a);
+        case 'wait_for_change':
+            return waitForChange(a);
         default:
             return err('unknown local tool: ' + name);
     }
@@ -315,7 +617,7 @@ function postJson(url, payload, timeoutMs) {
 
 async function upstreamTools(force) {
     const now = Date.now();
-    if (!force && now - upstreamCache.at < 30000) return upstreamCache.tools;
+    if (!force && upstreamCache.tools.length && now - upstreamCache.at < 30000) return upstreamCache.tools;
     upstreamCache.at = now;
     try {
         const init = await postJson(UPSTREAM, {
@@ -397,9 +699,25 @@ async function dispatch(msg, res) {
             const args = (msg.params && msg.params.arguments) || {};
             if (!name) return replyError(res, msg.id, -32602, 'missing tool name');
             const localNames = new Set(LOCAL_TOOLS.map((t) => t.name));
-            if (localNames.has(name)) return reply(res, msg.id, await callLocal(name, args));
-            const up = await upstreamTools(true);
-            if (up.some((t) => t.name === name)) return reply(res, msg.id, await upstreamCall(name, args));
+            const t0 = Date.now();
+            if (localNames.has(name)) {
+                const out = await callLocal(name, args);
+                if (name !== 'phone_act' && name !== 'watch_screen' && name !== 'wait_for_change') {
+                    hudPublish(out && out.isError ? 'error' : 'done',
+                        `${name} · ${Date.now() - t0}ms`, { ttl: 1400 });
+                }
+                return reply(res, msg.id, out);
+            }
+            // 工具清单 30s 缓存；未命中才强制刷新一次。旧实现每次都 initialize+list，
+            // 白白多出 3 个回环请求，是操控慢的主要来源之一。
+            let up = await upstreamTools(false);
+            if (!up.some((t) => t.name === name)) up = await upstreamTools(true);
+            if (up.some((t) => t.name === name)) {
+                hudPublish('running', `${name}`, {});
+                const out = await upstreamCall(name, args);
+                hudPublish(out && out.isError ? 'error' : 'done', `${name} · ${Date.now() - t0}ms`, { ttl: 1400 });
+                return reply(res, msg.id, out);
+            }
             if (UPSTREAM_HINT_TOOLS.includes(name)) {
                 return reply(res, msg.id, textResult({
                     error: 'B-class tool "' + name + '" requires the bundled native provider dsh-ios-control on 127.0.0.1:8090.',

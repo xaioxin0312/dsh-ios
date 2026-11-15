@@ -44,11 +44,16 @@ WCLIB=$(dirname "$WCDIR")
 chmod 755 "$APP/DSHLauncher" "$JB/usr/bin/dsh-app-ctl" "$JB/usr/bin/dsh-daemon" \
   "$JB/usr/bin/dsh-app-ui" "$JB/usr/bin/dsh-phone-bridge-daemon" \
   "$JB/usr/bin/dsh-phone-bridge-ctl" "$JB/usr/bin/mcp-logreader" \
+  "$JB/usr/bin/dsh-autostart" "$JB/usr/bin/dsh-autostart-agent" \
   "$D/node-safe" 2>/dev/null || true
-chmod 644 "$APP/Info.plist" "$APP/entitlements.plist" "$APP"/*.png 2>/dev/null || true
+chmod 644 "$APP/Info.plist" "$APP/entitlements.plist" "$APP"/*.png \
+  "$JB/Library/LaunchAgents/dev.airdevs.dsh.agent.plist" 2>/dev/null || true
 for f in "$JB/Library/LaunchDaemons/dev.airdevs.dsh.plist" \
          "$JB/Library/LaunchDaemons/dev.airdevs.dsh.phone-bridge.plist" \
-         "$DYL" "$DYLDIR/dsh-ios-control.plist" "$HELPER" "$JB/usr/bin/mcp-logreader"; do
+         "$JB/Library/LaunchAgents/dev.airdevs.dsh.agent.plist" \
+         "$DYL" "$DYLDIR/dsh-ios-hud.dylib" \
+         "$DYLDIR/dsh-ios-control.plist" "$DYLDIR/dsh-ios-hud.plist" \
+         "$HELPER" "$JB/usr/bin/mcp-logreader"; do
   [ -f "$f" ] && chown 0:0 "$f" 2>/dev/null || true
 done
 [ -f "$HELPER" ] && chmod 4755 "$HELPER" 2>/dev/null || true
@@ -56,6 +61,7 @@ LDID=""; for c in "$JB/usr/bin/ldid" "$JB/bin/ldid" /usr/bin/ldid; do [ -x "$c" 
 if [ -n "$LDID" ]; then
   [ -f "$ENT" ] && "$LDID" -S"$ENT" "$APP/DSHLauncher" 2>/dev/null || true
   [ -f "$DYL" ] && "$LDID" -S "$DYL" 2>/dev/null || true
+  [ -f "$DYLDIR/dsh-ios-hud.dylib" ] && "$LDID" -S "$DYLDIR/dsh-ios-hud.dylib" 2>/dev/null || true
 fi
 
 # 日志在 jbroot 系统区，绝不 mkdir/chown $DSH_HOME/logs。
@@ -138,6 +144,14 @@ if [ -n "$LC" ]; then
 fi
 [ -x "$CTL" ] && "$CTL" ensure >/dev/null 2>&1 || true
 
+# 3b) 自启兜底：系统域 bootstrap 之外，再拉起用户会话 agent。
+# 部分 rootless 环境开机不扫描 /var/jb/Library/LaunchDaemons，旧版表现就是
+# 「必须终端敲 dsh」。agent 在 SpringBoard 启动时探测 3080，未就绪才 exec
+# dsh-daemon；已就绪直接退出，不会和系统域抢端口。
+if [ -x "$JB/usr/bin/dsh-autostart" ]; then
+    "$JB/usr/bin/dsh-autostart" repair >/dev/null 2>&1 || true
+fi
+
 # --- 4) 自检：等最多 ~15s，确认新引擎树用固定 token 放行 -------------------
 READY=0
 i=0; while [ "$i" -lt 30 ]; do
@@ -160,5 +174,6 @@ done
 
 echo "DeepSeek Harness 单包：DSH 0.2.2-rc.3 + 全屏 Web Clip 入口 已就绪。"
 echo "  桌面点「DeepSeek Harness」图标即全屏使用；工作区 / 会话 / 插件全部保留。"
+echo "  +ios24.7：开机自启已加用户会话兜底；异常时终端跑 dsh-autostart status 诊断。"
 echo "  若桌面仍是旧图标或仍显示 401，请 respring 一次（SpringBoard 会缓存旧 Web Clip）。"
 exit 0
