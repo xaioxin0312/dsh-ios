@@ -6,6 +6,7 @@ app-bundle/.DSHLauncher.o
 # 打包成品与历史归档：118~130MB/个，超过 GitHub 单文件 100MB 硬限
 # 全部作为 Release 附件分发；sh build.sh / sh app-bundle/build-app.sh 可 1:1 重建。
 dist/*.deb
+/*.deb
 dist/archive/
 app-bundle/dist/
 

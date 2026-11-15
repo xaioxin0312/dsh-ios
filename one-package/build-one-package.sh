@@ -56,6 +56,8 @@ assert d.get('URL', '').endswith('?token=' + tok), 'Web Clip URL 的 token 与 d
 l = plistlib.load(open(ld, 'rb'))
 assert l.get('EnvironmentVariables', {}).get('DSH_WEB_TOKEN') == tok, 'launchd plist 未注入同一个 token'
 assert '/var/jb/var/log/dsh-app/' in l.get('StandardOutPath', ''), 'daemon 日志仍写在 $DSH_HOME'
+pa = l.get('ProgramArguments', [])
+assert pa == ['/var/jb/usr/bin/dsh-daemon'], 'launchd 必须直接执行 dsh-daemon（/var/jb/bin/sh 在 rootless 上不存在，无法 spawn）'
 s = open(patch, encoding='utf-8').read()
 assert ('"'+tok+'"') in s, '固定 token 补丁的缺省值与 dsh-web-token 不一致'
 print('    Web Clip / plist / 补丁 / 常量文件 四处一致')
@@ -338,16 +340,52 @@ if [ "$TAG" != "ios18" ]; then
     echo "    版本标签: +$TAG（并列实验档，不覆盖 +ios18）"
 fi
 # +ios24.x 的 changelog 只写在 stage 副本里：共享 control 原文件一个字节不动。
-# +ios18 是已冻结的对照档（927b5308…），当前源码面向 +ios24.2，不再承诺
+# +ios18 是已冻结的对照档（927b5308…），当前源码面向 +ios24.5，不再承诺
 # 从当前 HEAD 重新构建 +ios18 能 1:1 复现当时的历史产物。
-case "$TAG" in ios24.1|ios24.2) ;; *) skip_changelog=1 ;; esac
+case "$TAG" in ios24.1|ios24.2|ios24.3|ios24.4|ios24.5) ;; *) skip_changelog=1 ;; esac
 if [ "${skip_changelog:-0}" != "1" ]; then
     python3 - "$STAGE/DEBIAN/control" "$TAG" <<'PY'
 import sys
 p, tag = sys.argv[1:3]
 s = open(p, encoding='utf-8').read()
 extra = ""
-if tag == "ios24.2":
+if tag == "ios24.5":
+    extra = """ * 修「只有终端敲 dsh 才能启动」：launchd plist 的 ProgramArguments[0]
+   原为 /var/jb/bin/sh，但包内与 rootless 底座都没有这个路径，launchd
+   posix_spawn 直接失败，RunAtLoad + KeepAlive 形同虚设；
+ * 改为直接执行 /var/jb/usr/bin/dsh-daemon（脚本 shebang #!/bin/sh），
+   安装后 launchd 正常自启并保活，桌面「DeepSeek Harness」图标即点即用，
+   不需要再开终端；
+ * 保留 +ios24.4 的 `.corrupt-<ts>` 会话备份目录恢复/隔离、+ios24.3 的
+   profile 核心包隔离、+ios24.2 的 zstd→none 与 darwin→browse；
+ * control / dsh-doctor / README / GitHub Release 统一到 +ios24.5。
+"""
+elif tag == "ios24.3":
+    extra = """ * 继续修「工作区/对话加载不出」的第二个根因（装过插件、从 rc.5 升级的
+   设备必现）：dsh plugin add 后 pnpm 的 hoisted 布局会把 @deepseek-ai
+   核心包也装进 profiles/<name>/node_modules；boot 按 profile 优先进
+   行模块解析，于是 rc.3 的 directory-picker 行拿到 rc.5 旧副本，版本
+   守卫判定不兼容后把整行 disabled，directoryPickerController 永远
+   unavailable（typert gateway: active Service ... is unavailable）；
+ * 启动前的 heal 现在会隔离「运行时同名、版本不同」的核心包副本到
+   $DSH_HOME/.dsh-compat-quarantine（带版本号备份，不删除），用户自己
+   装的第三方插件一律不动；隔离后目录选择器与会话持久化都走运行时
+   版本，rc.5 创建的明文会话/工作区原样加载；
+ * 保留 +ios24.2 的 zstd→none 明文会话兼容与 darwin→browse 目录选择器
+   两项修复。
+"""
+elif tag == "ios24.4":
+    extra = """ * 修会话目录里的历史备份 `<id>.corrupt-<ts>/` 被当成活动会话读取：
+   其 session.v4.jsonl 头仍是 `<id>`，stored-identity 校验判定路径不一致，
+   抛错后 workspaceRegistry 不注册，工作区/对话全空（真机日志:
+   dsh: warning: 5 entries did not activate / session-controller pending）；
+ * 启动前 heal 会扫描 sessions/<project>/ 下的 `.corrupt-<ts>` 目录：
+   同名正常会话不存在时改名回正常会话（恢复数据），已存在时移到
+   $DSH_HOME/.dsh-compat-quarantine/sessions/ 保留，不再影响 boot；
+ * 保留 +ios24.3 的 profile 核心包隔离、+ios24.2 的 zstd→none 与
+   darwin→browse 修复。
+"""
+elif tag == "ios24.2":
     extra = """ * 修「工作区/对话加载不出」：会话默认压缩 zstd 改回 none，兼容用户从
    +ios15/+ios18 升级带来的明文 .jsonl 会话（不再触发 checkRootEncoding
    全局 fatal，workspace/session/directoryPicker 控制器全部正常装配）；

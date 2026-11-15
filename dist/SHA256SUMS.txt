@@ -83,7 +83,7 @@ f5548928a5fd83f727b9da0716519aa4abb0a15b9ed4acbd49de9944c799bf0f  dev.airdevs.ds
 # 核验：DSH_IOS_TAG=ios24.1 sh one-package/verify-one-package.sh <deb> <bundle> app-bundle/payload
 f25f1acdeb672977022003fa3029a2a011210a30934828a623c407e2252dd4f3  dev.airdevs.dsh_0.2.2-rc.3+ios24.1_iphoneos-arm64.deb
 
-# --- rc.3 + Node v24.19.0（推荐 · A11 第三轮真机回归：工作区/对话加载修复）---
+# --- rc.3 + Node v24.19.0（A11 第三轮真机回归：工作区/对话加载修复；已被 +ios24.3 取代）---
 # 2026-11-14 真机三张截图：安装与 dsh-doctor 全过（OK=28 WARN=1 FAIL=0、
 #   Node 24 零 JIT 档 nowasm 可用），但全屏 Web UI 里工作区/对话全空，
 #   点「选择工作区目录」报 typert gateway: directoryPicker/list: active
@@ -113,6 +113,74 @@ f25f1acdeb672977022003fa3029a2a011210a30934828a623c407e2252dd4f3  dev.airdevs.ds
 # 核验：DSH_IOS_TAG=ios24.2 sh one-package/verify-one-package.sh <deb> <bundle> app-bundle/payload
 1b44deff6b336f914b8d87923132f07c975632558a1e865fa499f91fb04de417  dev.airdevs.dsh_0.2.2-rc.3+ios24.2_iphoneos-arm64.deb
 e3416f563d1f4f8957054eaf5a2db4001bfe59df36b7be302c58dabd5b03b2a7  fix-ios24.sh
+
+# --- rc.3 + Node v24.19.0（A11 第四轮：工作区/对话加载修复补强；已被 +ios24.4 取代）---
+# 2026-11-15：+ios24.2 装好后仍可能复现同一个 directoryPickerController
+#   unavailable。A/B 实跑定位到第二个根因：用户执行 dsh plugin add 后，
+#   pnpm hoisted 会把 @deepseek-ai 核心包也装进
+#   $DSH_HOME/profiles/<name>/node_modules；boot 的模块解析 profile 优先，
+#   于是 rc.3 的 directory-picker 行加载到 rc.5 旧副本，版本守卫把整行
+#   disabled：
+#     dsh: disabling profile plugin row "directory-picker": Plugin
+#     @deepseek-ai/dsh-host-directory-picker-auto@0.2.1-rc.5 is incompatible
+#     with dsh 0.2.2-rc.3 ...
+#   directoryPicker 服务因此永远不注册；会话持久化等核心包被遮蔽时同理。
+# 修复：shims/dsh-home-heal.cjs 每次启动前把「运行时同名、版本不同」的核心
+#   包副本隔离到 $DSH_HOME/.dsh-compat-quarantine（带版本号备份，不删除），
+#   用户第三方插件一律不动；隔离后 picker 与会话持久化都走运行时版本。
+#   +ios24.3 保留 +ios24.2 的 zstd→none 与 darwin→browse 两项修复。
+# 端到端实证（Linux Node v24.19.0 + rc.5 创建的 workspace/session）：
+#   隔离前 boot 打出版本守卫 disabled 日志、directoryPicker/list 报
+#   active Service unavailable；隔离后同一 home 启动零挂起，
+#   directoryPicker/list ok、session/list 返回 rc.5 的会话。
+# 构建：以 +ios24.2 交付树为基线，仅替换 shims/dsh-home-heal.cjs 与
+#   dsh-doctor 版本文案，SOURCE_DATE_EPOCH=1700000000 归一化后
+#   dpkg-deb -Zgzip -z9 重打包；其余 payload 文件逐字节未变。
+# 核验：dpkg-deb -x 后与 +ios24.2 逐文件 diff，仅上述两文件不同。
+7dfe4286292a30360be04b5a13ccb034d2900abcb3fc0ea80482c7d4312c98a2  dev.airdevs.dsh_0.2.2-rc.3+ios24.3_iphoneos-arm64.deb
+
+# --- rc.3 + Node v24.19.0（A11 第五轮：工作区/对话加载修复，会话备份目录；已被 +ios24.5 取代）---
+# 2026-11-15 真机日志（+ios24.3 装好后仍复现）：
+#   dsh: warning: 5 entries did not activate
+#   workspace: Error: corrupt session log ".../<id>.corrupt-1794647827/
+#     session.v4.jsonl": header id "<id>" and cwd identify ".../<id>/..."
+#   session-controller / workspace-controller: pending (workspaceRegistry)
+# 根因：sessions/<project>/ 下历史备份 `<id>.corrupt-<ts>/` 被
+#   listSessionDirs() 当成活动会话；日志头里的 id/cwd 仍是 <id>，
+#   assertStoredIdentity 判定路径不一致并抛普通 Error（不是
+#   SessionPersistenceCorruptionError），workspaceRegistry 装配 fatal。
+# 修复：dsh-home-heal.cjs 启动前扫描 `.corrupt-<数字>` 目录：
+#   - 同名正常会话不存在 -> 改名回正常会话（恢复数据）；
+#   - 同名正常会话已存在 -> 移到
+#     $DSH_HOME/.dsh-compat-quarantine/sessions/ 保留；
+#   +ios24.4 保留 +ios24.3 的 profile 核心包隔离、+ios24.2 的
+#   zstd→none 与 darwin→browse。
+# 端到端实证（Linux Node v24.19.0 + rc.5 创建的会话）：
+#   未修：同一日志 4 个 entry pending；修后：启动零 warning，
+#   session/list 返回 rc.5 会话（title "hello from rc5"），
+#   directoryPicker/list ok。
+# 构建：+ios24.3 交付树仅替换 shims/dsh-home-heal.cjs 与 doctor 版本文案，
+#   SOURCE_DATE_EPOCH=1700000000 归一化后 dpkg-deb -Zgzip -z9 重打包。
+# 核验：dpkg-deb -x 后与 stage 逐文件 diff 一致；heal 与源码逐字节一致。
+3de5e7ea849ef92f843552351bf4a3a43111245effa58a9cb341942838fb3bb9  dev.airdevs.dsh_0.2.2-rc.3+ios24.4_iphoneos-arm64.deb
+
+# --- rc.3 + Node v24.19.0（推荐正式版 · A11 第六轮：免终端自启）---
+# 2026-11-15：真机装完 +ios24.4 后，桌面图标仍打不开，必须终端敲 dsh。
+# 根因：launchd plist 的 ProgramArguments[0] 是 /var/jb/bin/sh；rootless
+#   底座与包内都没有这个路径，launchd posix_spawn 直接失败，
+#   RunAtLoad + KeepAlive 形同虚设。终端 dsh 走 /var/jb/usr/bin/dsh，
+#   所以只有手动命令能起。
+# 修复：ProgramArguments 改为直接执行 /var/jb/usr/bin/dsh-daemon
+#   （脚本 shebang #!/bin/sh，755）；launchd 正常 spawn/保活，桌面图标
+#   即点即用。构建脚本增加 plist ProgramArguments 断言，防止回退。
+# 保留 +ios24.4 的 .corrupt-<ts> 会话恢复、+ios24.3 的 profile 核心包
+#   隔离、+ios24.2 的 zstd→none 与 darwin→browse。
+# 构建：以 +ios24.4 交付树为基线，仅替换 plist、doctor 版本文案与
+#   control 描述；heal 逐字节未变；SOURCE_DATE_EPOCH=1700000000，
+#   dpkg-deb -Zgzip -z9。
+# 核验：plistlib 解析 ProgramArguments=['/var/jb/usr/bin/dsh-daemon']，
+#   目标 755 且 shebang #!/bin/sh；包内文本无 /var/jb/bin/sh 引用。
+bce5bf18cf3417110b47fa651001331a8cf87ebe7d9a23c5db73b6baaee7497d  dev.airdevs.dsh_0.2.2-rc.3+ios24.5_iphoneos-arm64.deb
 
 # --- 可选生态插件（手动安装，不预装）---
 f9f74e0f485148acfe544b88e35c17da196b6ff4c6da4f7a6576a7c566cd068a  dsh-ios-phone-control-0.1.0.tgz

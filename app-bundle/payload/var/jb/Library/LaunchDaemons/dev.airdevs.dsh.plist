@@ -41,7 +41,6 @@
 	<string>Background</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/var/jb/bin/sh</string>
 		<string>/var/jb/usr/bin/dsh-daemon</string>
 	</array>
 	<key>RunAtLoad</key>

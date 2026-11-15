@@ -1,6 +1,6 @@
 # dsh for iPhone X / iOS 16.7.15 / Dopamine 3.0 (rootless)
 
-**做成 rootless 越狱包（.deb），装完在终端敲 `dsh` 直接启动。** 不走 Air2，不需要 WKWebView，不需要 iSH 模拟器，不需要 TrollStore，不装系统 node。
+**做成 rootless 越狱包（.deb），装完点桌面「DeepSeek Harness」图标即用，launchd 常驻自启，无需终端。** 不走 Air2，不需要 WKWebView，不需要 iSH 模拟器，不需要 TrollStore，不装系统 node。
 
 > 目标机：iPhone X (iPhone10,3), A11 **arm64**, iOS **16.7.15**, Dopamine 3.0 rootless (`/var/jb`)。
 > **稳定底座 `+ios15`**（默认、真机验证过）：修好「点击插件 → 安装插件」里所有手动方式、修好「插件市场加载失败一堆报错」、给生态插件加仅手动安装生效的转化逻辑、并让 GitHub 仓库可 1:1 字节级复现构建。dsh **0.2.1-rc.5** + 内置 node **22.12.0**，交付 deb 与热修的 SHA 保持不变。此前 14 轮修复全部保留并回归。
@@ -8,8 +8,48 @@
 > 关于 Node 24.9：**（rc.1 时代的历史结论）** 当时公开可得的 iOS arm64 Node 可执行文件确实不存在（详见 [`docs/DSH-NODE-UPGRADE-EVALUATION.md`](docs/DSH-NODE-UPGRADE-EVALUATION.md)），但实证发现官方 `0.2.2-rc.1` 的四处 Node 22.12 兼容补丁锚点与 `0.2.1-rc.5` **逐字一致**，因此用同一套补丁 + 同一个已验证的 Node 22.12.0，做出了经 31 项核验（含真 boot、会话创建与恢复）的完整升级包。
 >
 > **⚠️ 2026-11-14 更正**：上面「不存在」的结论已被本仓库自己的 CI 推翻 —— GitHub Actions run `43532556241` 成功编译出 **Node v24.19.0 iOS arm64 独立 CLI**（artifact `14095226518` / Release `node24-exp`，SHA `8bebb2a2…`）。且 rc.3 的 `engines.node >= 24.9.0` **不是 advisory**（`bin.js` 用 `import.meta.main`）。故 rc.3 单包已改用该成品。首版 `+ios24` 在 A11 真机上暴露运行时不兼容，
-**当前推荐档位是 `+ios24.2`**（第三轮真机回归修复版，修「工作区/对话加载不出」），
-详见下方新章与 `one-package/README.md`。
+**当前推荐档位是 `+ios24.5` 正式版**（免终端自启 + 工作区/对话加载修复），
+详见下方「正式版 +ios24.5」章节与 `one-package/README.md`。
+
+---
+
+## 正式版 · `+ios24.5`（2026-11-15，免终端自启 + 工作区/对话修复）
+
+> 当前推荐安装的正式版。Release 附件：
+> `dev.airdevs.dsh_0.2.2-rc.3+ios24.5_iphoneos-arm64.deb`。
+> 适用 iPhone X (A11, arm64) / iOS 15–16.7.x / Dopamine rootless (`/var/jb`)。
+
+### 本版修复
+
+| 症状 | 根因 | `+ios24.5` 修复 |
+| --- | --- | --- |
+| 装完必须开终端敲 `dsh`，桌面图标打不开 | launchd plist 用 `/var/jb/bin/sh` 启动 daemon，rootless 底座/包内没有这个路径，`posix_spawn` 失败，`RunAtLoad + KeepAlive` 形同虚设 | `ProgramArguments` 改为直接执行 `/var/jb/usr/bin/dsh-daemon`（脚本 shebang `#!/bin/sh`），launchd 正常自启并保活 |
+| 工作区/对话空白 | `sessions/<project>/<id>.corrupt-<ts>/` 备份目录被当成活动会话，`workspaceRegistry` 装配 fatal | 启动前恢复为正常会话，或移到 `.dsh-compat-quarantine/sessions/` |
+| 升级后目录选择器不可用 | profile 里的 rc.5 核心包遮蔽运行时，`directory-picker` 行被版本守卫禁用 | 启动前隔离版本不一致的核心包副本（+ios24.3） |
+| rc.5 明文会话读不出 | rc.3 默认 zstd / darwin 走 native picker | 默认 `none` + 强制 `browse`（+ios24.2） |
+
+### 安装与验证
+
+```sh
+# Sileo / Filza 安装，或
+dpkg -i dev.airdevs.dsh_0.2.2-rc.3+ios24.5_iphoneos-arm64.deb
+```
+
+装完 postinst 会自动换掉旧 daemon。验证：
+
+```sh
+dsh-doctor
+# 应全部 OK；桌面图标直接打开即可，不需要先敲 dsh
+```
+
+原有工作区、会话、插件全部保留；被隔离的旧核心包在
+`$DSH_HOME/.dsh-compat-quarantine`，会话备份在
+`$DSH_HOME/.dsh-compat-quarantine/sessions`。
+
+### 已知问题
+
+A11 只能跑 `--jitless`，第三方 `dsh-market` 若 import `node:inspector`
+会报 `ERR_INSPECTOR_NOT_AVAILABLE`，不影响工作区/对话；需要该插件时再单独适配。
 
 ---
 

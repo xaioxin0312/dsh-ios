@@ -224,7 +224,7 @@ s = sub(s, """    if grep -q 'const DEFAULT_COMPRESSION = "none";' "$PJ"; then
         ok "会话默认压缩 none（兼容既有明文 .jsonl 会话，工作区/对话可加载）"
     else
         bad "会话默认压缩仍是 zstd，会撞上既有 .jsonl 会话导致工作区/对话全空" \\
-            "跑 sh fix-ios24.sh 或重装 +ios24.2；make_ios_data_compat.py 会改成 none"
+            "跑 sh fix-ios24.sh 或重装 +ios24.5；make_ios_data_compat.py 会改成 none"
     fi""", label="doctor 会话压缩")
 s = sub(s, 'echo "结论：全部关键项通过。终端输入 dsh 即可启动 web 工作台。"',
         'echo "结论：全部关键项通过。点桌面「DeepSeek Harness」全屏图标即用；终端输入 dsh 亦可。"',
