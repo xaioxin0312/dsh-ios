@@ -175,8 +175,10 @@ sec '4) 零 JIT 档（A11 上 undici/llhttp WASM 会 SIGBUS）'
 SHIM=$(find "$ROOT" -name 'fetch-shim.cjs' -type f 2>/dev/null | head -1)
 if [ -n "$SHIM" ] && [ -n "$VFY" ]; then
     ZPORT=18092
+    # +ios24.6：绝不能带 --no-expose-wasm —— Node 24 / V8 13.x 已删除该
+    # flag，传了就是 bad option 退出 9（真机 daemon 起不来的根因）。
     DSH_BRIDGE_PORT="$ZPORT" DSH_HOME="$TMP/home" \
-        "$NODE" --jitless --no-expose-wasm --require "$SHIM" --expose-internals "$BR/server.cjs" \
+        "$NODE" --jitless --require "$SHIM" --expose-internals "$BR/server.cjs" \
         > "$TMP/bridge-jitless.log" 2>&1 & ZPID=$!
     i=0; ZOK=0
     while [ "$i" -lt 40 ]; do
@@ -184,7 +186,18 @@ if [ -n "$SHIM" ] && [ -n "$VFY" ]; then
         i=$((i+1)); sleep 0.2
     done
     kill "$ZPID" 2>/dev/null || true
-    [ "$ZOK" -eq 1 ] && ok '零 JIT 档下 bridge 正常启动并响应 /health' || bad '零 JIT 档启动失败'
+    if [ "$ZOK" -eq 1 ]; then
+        ok '零 JIT 档下 bridge 正常启动并响应 /health'
+    elif grep -q 'WebAssembly is not defined' "$TMP/bridge-jitless.log" 2>/dev/null \
+         && "$NODE" -e 'process.exit(Number(process.versions.node.split(".")[1])<9?0:1)' 2>/dev/null; then
+        # 上游 Node 24.0–24.8 的 --jitless 在模块加载期就会让内置 undici 抛
+        # "WebAssembly is not defined"（与本工具链无关；设备上是 24.19.0，
+        # dsh 的 nowasm 档在同一运行时上已验证可跑）。构建机 Node 低于
+        # 24.9 时跳过，不记为失败。
+        ok "零 JIT 档在 Node $("$NODE" -v)（<24.9）上是上游 bug，跳过（设备 24.19 不受影响）"
+    else
+        bad '零 JIT 档启动失败'
+    fi
 else
     bad '缺 fetch-shim.cjs 或验证目录，跳过零 JIT 档'
 fi
