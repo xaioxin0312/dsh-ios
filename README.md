@@ -1,6 +1,6 @@
 # dsh for iPhone X / iOS 16.7.15 / Dopamine 3.0 (rootless)
 
-**做成 rootless 越狱包（.deb），装完在终端敲 `dsh` 直接启动。** 不走 Air2，不需要 WKWebView，不需要 iSH 模拟器，不需要 TrollStore，不装系统 node。
+**做成 rootless 越狱包（.deb），装完在终端敲 `dsh` 直接启动。** 不需要 WKWebView，不需要 iSH 模拟器，不需要 TrollStore，不装系统 node。
 
 > 目标机：iPhone X (iPhone10,3), A11 **arm64**, iOS **16.7.15**, Dopamine 3.0 rootless (`/var/jb`)。
 > **稳定底座 `+ios15`**（默认、真机验证过）：修好「点击插件 → 安装插件」里所有手动方式、修好「插件市场加载失败一堆报错」、给生态插件加仅手动安装生效的转化逻辑、并让 GitHub 仓库可 1:1 字节级复现构建。dsh **0.2.1-rc.5** + 内置 node **22.12.0**，交付 deb 与热修的 SHA 保持不变。此前 14 轮修复全部保留并回归。
