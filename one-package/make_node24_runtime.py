@@ -75,6 +75,14 @@ D=/var/jb/usr/lib/dsh
 exec "$D/bin/node" --jitless --require "$D/fetch-shim.cjs" "$@"
 ''', 0o755)
 
+# ------------------------------------------------ 0b) 图片支持（+ios24.6）
+# rc.3 的图片准入/读取/请求版本全部依赖 sharp；iOS 包没有 sharp 原生库，
+# 旧会话里任意一张图片都会让 prepareImages() 抛错，整轮请求变成
+# 「DeepSeek Messages transport failed」。preload 用纯 JS 解析头 + 直存/
+# 直读 attachment 对象，彻底绕开 sharp（详见 ios-image-shim.mjs 头注释）。
+write(path(D, "ios-image-shim.mjs"),
+      read(path(HERE, "ios-image-shim.mjs")), 0o644)
+
 # ---------------------------------------------------------------- 1) tier.sh
 p = path(D, "tier.sh")
 s = read(p)
@@ -118,6 +126,25 @@ s = read(p)
 s = sub(s, '    "$NODE" "$D/dsh-home-heal.cjs" "$DSH_HOME" "$D" || true',
         '    "$D/node-safe" "$D/dsh-home-heal.cjs" "$DSH_HOME" "$D" || true',
         label="dsh heal 零 JIT")
+# +ios24.6：手机操控 MCP 自动注册。daemon 只跑 bridge、不改用户配置；
+# 注册放在「DSH 读取配置之前」并以当前用户（launchd= mobile）写入，既保证
+# 装完即生效，也避免 root 属主把 cordis.patch.yml 写坏。config-off 会留下
+# $DSH_HOME/.phone-bridge-no-auto-config，之后不再自动写。
+s = sub(s, '''if [ -f "$D/dsh-home-heal.cjs" ]; then
+    "$D/node-safe" "$D/dsh-home-heal.cjs" "$DSH_HOME" "$D" || true
+fi''',
+'''if [ -f "$D/dsh-home-heal.cjs" ]; then
+    "$D/node-safe" "$D/dsh-home-heal.cjs" "$DSH_HOME" "$D" || true
+fi
+
+# 2a2) +ios24.6：手机操控 MCP 幂等注册（可逆）
+#      只追加一条 id=dsh-ios-phone-bridge-mcp 的 @deepseek-ai/dsh-mcp-client，
+#      其它插件行原样保留；config-off 后靠标记文件永久关闭。
+if [ -f "$JB/usr/lib/dsh-phone-bridge/ensure-config.cjs" ] \\
+   && [ ! -f "$DSH_HOME/.phone-bridge-no-auto-config" ]; then
+    "$D/node-safe" "$JB/usr/lib/dsh-phone-bridge/ensure-config.cjs" "$DSH_HOME" on \\
+        >/dev/null 2>&1 || true
+fi''', label="dsh 手机操控注册")
 s = sub(s, '    echo "     跑 dsh-doctor 看逐档结果；确认 node 二进制完整（101,297,040 字节）。" >&2',
         '    echo "     跑 dsh-doctor 看逐档结果；确认 node 二进制完整（当前 $(wc -c < "$NODE") 字节）。" >&2',
         label="dsh 大小提示")
@@ -135,6 +162,13 @@ fi""",
     TIER_ARGS=$(tier_args_for nowasm)
     TIER_SOURCE=fallback
 fi""", label="dsh 兜底")
+# +ios24.6：--import 只作用于 dsh 主进程（不污染 pnpm / doctor 的短命 node）。
+s = sub(s, '"$NODE" $TIER_ARGS $TIER_SQLITE_ARGS --expose-internals "$BIN" "$@"',
+        '"$NODE" $TIER_ARGS $TIER_SQLITE_ARGS --import "$D/ios-image-shim.mjs" --expose-internals "$BIN" "$@"',
+        label="dsh 图片 preload")
+s = sub(s, '"$NODE" $NOWASM_ARGS $TIER_SQLITE_ARGS --expose-internals "$BIN" "$@"',
+        '"$NODE" $NOWASM_ARGS $TIER_SQLITE_ARGS --import "$D/ios-image-shim.mjs" --expose-internals "$BIN" "$@"',
+        label="dsh 图片 preload 降级")
 write(p, s)
 
 # ---------------------------------------------------------------- 3) dsh-doctor

@@ -316,6 +316,33 @@ cp "$APPB/prebuilt/DSHLauncher"     "$STAGE/var/jb/Applications/DSH.app/DSHLaunc
 cp "$APPB/prebuilt/dsh-app-helper"  "$STAGE/var/jb/usr/bin/dsh-app-helper"
 python3 "$APPB/make_app_icon.py" "$STAGE/var/jb/Applications/DSH.app" | sed 's/^/    /'
 
+# 3e-2 手机操控（DSH GO 的 iOS 等价实现：SpringBoard 常驻 AX + HID 注入）
+#   原生层：ios-mcp 1.2.8（MIT，见 LICENSE-ios-mcp / NOTICE），随包下发
+#   prebuilt dylib，respring 后由 ElleKit/Substrate 注入 SpringBoard，暴露
+#   127.0.0.1:8090/mcp（AX 树 / 点按 / 滑动 / 输入 / 截图 / OCR）；
+#   bridge：8091/mcp，合并本机 A 层工具（设备信息、文件、命令、App、URL、
+#   进程、syslog）与原生 B 层工具，DSH 通过 @deepseek-ai/dsh-mcp-client 接入。
+PB="$ROOT/phone-bridge"
+NATIVE="$PB/native"
+DL="$STAGE/var/jb/Library/MobileSubstrate/DynamicLibraries"
+mkdir -p "$DL" "$STAGE/var/jb/usr/lib/dsh-phone-bridge" \
+         "$STAGE/var/jb/usr/share/doc/dev.airdevs.dsh"
+cp "$NATIVE/prebuilt/dsh-ios-control.dylib" "$DL/dsh-ios-control.dylib"
+cp "$NATIVE/dsh-ios-control.plist"          "$DL/dsh-ios-control.plist"
+cp "$NATIVE/prebuilt/mcp-logreader"         "$STAGE/var/jb/usr/bin/mcp-logreader"
+cp "$PB/server.cjs" "$PB/ensure-config.cjs" "$STAGE/var/jb/usr/lib/dsh-phone-bridge/"
+cp "$PB/dsh-phone-bridge-daemon" "$PB/dsh-phone-bridge-ctl" "$STAGE/var/jb/usr/bin/"
+cp "$PB/dev.airdevs.dsh.phone-bridge.plist" "$STAGE/var/jb/Library/LaunchDaemons/"
+cp "$NATIVE/LICENSE-ios-mcp" "$NATIVE/NOTICE" "$STAGE/var/jb/usr/share/doc/dev.airdevs.dsh/"
+cp "$PB/README.md" "$STAGE/var/jb/usr/share/doc/dev.airdevs.dsh/phone-bridge-README.md"
+chmod 755 "$STAGE/var/jb/usr/bin/mcp-logreader" \
+          "$STAGE/var/jb/usr/bin/dsh-phone-bridge-daemon" \
+          "$STAGE/var/jb/usr/bin/dsh-phone-bridge-ctl"
+chmod 644 "$DL/dsh-ios-control.dylib" "$DL/dsh-ios-control.plist" \
+          "$STAGE/var/jb/usr/lib/dsh-phone-bridge/"*.cjs \
+          "$STAGE/var/jb/Library/LaunchDaemons/dev.airdevs.dsh.phone-bridge.plist"
+echo "    手机操控：原生 8090 + bridge 8091 + 开机自启 + 自动注册 MCP"
+
 # 3f 全屏 Web Clip（真正装进设备的那一份）
 mkdir -p "$STAGE/var/jb/usr/lib/dsh/webclip"
 cp "$HERE/webclip/Info.plist" "$STAGE/var/jb/usr/lib/dsh/webclip/Info.plist"
@@ -340,16 +367,36 @@ if [ "$TAG" != "ios18" ]; then
     echo "    版本标签: +$TAG（并列实验档，不覆盖 +ios18）"
 fi
 # +ios24.x 的 changelog 只写在 stage 副本里：共享 control 原文件一个字节不动。
-# +ios18 是已冻结的对照档（927b5308…），当前源码面向 +ios24.5，不再承诺
+# +ios18 是已冻结的对照档（927b5308…），当前源码面向 +ios24.6，不再承诺
 # 从当前 HEAD 重新构建 +ios18 能 1:1 复现当时的历史产物。
-case "$TAG" in ios24.1|ios24.2|ios24.3|ios24.4|ios24.5) ;; *) skip_changelog=1 ;; esac
+case "$TAG" in ios24.1|ios24.2|ios24.3|ios24.4|ios24.5|ios24.6) ;; *) skip_changelog=1 ;; esac
 if [ "${skip_changelog:-0}" != "1" ]; then
     python3 - "$STAGE/DEBIAN/control" "$TAG" <<'PY'
 import sys
 p, tag = sys.argv[1:3]
 s = open(p, encoding='utf-8').read()
 extra = ""
-if tag == "ios24.5":
+if tag == "ios24.6":
+    extra = """ * 图片支持（读取 + 上传，全程不依赖 sharp 原生库）：rc.3 的
+   prepareImages() 会遍历历史里每一张图片并调用 readImageRequest()，
+   而该链路依赖 sharp；iOS 包只有 JS 壳，任一历史图片都会在请求发出前
+   抛错，被 adapter 统一包成 TRANSPORT —— 这就是「新对话正常、老对话
+   一发消息就 5/5 重试 DeepSeek Messages transport failed」的真因；
+ * Node --import 预加载纯 JS 图片层：读取 attachments/v1 对象并校验
+   sha256，PNG/JPEG/GIF/WebP 头部解析宽高/alpha/动图/EXIF 方向，
+   上传直存原图；对象缺失时退化为 1x1 PNG 占位，老会话不再整轮失败；
+ * 内置手机操控（DSH GO 的 iOS 等价实现）：SpringBoard 常驻 ios-mcp
+   原生层（AX 树 / 点按 / 滑动 / 输入 / 截图 / OCR，127.0.0.1:8090）
+   + 本机 bridge（8091）合并文件/App/进程/syslog 等 A 层工具，launchd
+   开机自启；dsh wrapper 每次启动前以 mobile 身份幂等注册 MCP，装完
+   respring 一次即可让模型直接点按/输入/截图；
+ * 修 phone-bridge 在 Node 24 上的启动失败（--no-expose-wasm 已删除，
+   改用 node-safe 零 JIT 档），ctl 新增 native/status 诊断与 config-off
+   标记，撤销自动注册后不再写用户配置；
+ * 保留 +ios24.5 的 launchd 免终端自启、+ios24.4 的 corrupt 会话恢复、
+   +ios24.3 的 profile 核心包隔离、+ios24.2 的 zstd→none 与 browse。
+"""
+elif tag == "ios24.5":
     extra = """ * 修「只有终端敲 dsh 才能启动」：launchd plist 的 ProgramArguments[0]
    原为 /var/jb/bin/sh，但包内与 rootless 底座都没有这个路径，launchd
    posix_spawn 直接失败，RunAtLoad + KeepAlive 形同虚设；
@@ -458,6 +505,34 @@ if [ "$NMAJOR" -ge 24 ]; then
     done
     echo "    Node 24 运行时断言通过（nowasm 可用 / 短命调用与插件子进程全零 JIT）"
 fi
+
+# +ios24.6：图片支持 + 手机操控（缺任何一件都不允许出包）
+for f in \
+  "$STAGE/var/jb/usr/lib/dsh/ios-image-shim.mjs" \
+  "$STAGE/var/jb/Library/MobileSubstrate/DynamicLibraries/dsh-ios-control.dylib" \
+  "$STAGE/var/jb/Library/MobileSubstrate/DynamicLibraries/dsh-ios-control.plist" \
+  "$STAGE/var/jb/Library/LaunchDaemons/dev.airdevs.dsh.phone-bridge.plist" \
+  "$STAGE/var/jb/usr/bin/dsh-phone-bridge-daemon" \
+  "$STAGE/var/jb/usr/bin/dsh-phone-bridge-ctl" \
+  "$STAGE/var/jb/usr/bin/mcp-logreader" \
+  "$STAGE/var/jb/usr/lib/dsh-phone-bridge/server.cjs" \
+  "$STAGE/var/jb/usr/lib/dsh-phone-bridge/ensure-config.cjs" \
+  "$STAGE/var/jb/usr/share/doc/dev.airdevs.dsh/NOTICE"; do
+    [ -e "$f" ] || { echo "构建中止：缺 $f" >&2; exit 1; }
+done
+[ "$(grep -c -- '--import "\$D/ios-image-shim.mjs"' "$STAGE/var/jb/usr/bin/dsh")" -eq 2 ] || {
+    echo "构建中止：dsh wrapper 的两条 node 启动行未同时注入图片 preload" >&2; exit 1; }
+grep -q 'ensure-config.cjs" "\$DSH_HOME" on' "$STAGE/var/jb/usr/bin/dsh" || {
+    echo "构建中止：dsh wrapper 未接手机操控 MCP 自动注册" >&2; exit 1; }
+if grep -v '^[[:space:]]*#' "$STAGE/var/jb/usr/bin/dsh-phone-bridge-daemon" | grep -q -- '--no-expose-wasm'; then
+    echo "构建中止：phone-bridge daemon 仍带 Node 24 已删除的 --no-expose-wasm" >&2; exit 1
+fi
+sh -n "$STAGE/var/jb/usr/bin/dsh-phone-bridge-daemon" || exit 1
+sh -n "$STAGE/var/jb/usr/bin/dsh-phone-bridge-ctl" || exit 1
+node --check "$STAGE/var/jb/usr/lib/dsh-phone-bridge/server.cjs" || exit 1
+node --check "$STAGE/var/jb/usr/lib/dsh-phone-bridge/ensure-config.cjs" || exit 1
+node --check "$STAGE/var/jb/usr/lib/dsh/ios-image-shim.mjs" || exit 1
+echo "    图片支持 / 手机操控断言通过（preload + 原生层 + bridge + 自动注册）"
 for f in "$STAGE/var/jb/usr/bin/dsh" "$STAGE/var/jb/usr/bin/dsh-daemon" \
          "$STAGE/var/jb/usr/bin/dsh-app-ctl" "$STAGE/var/jb/usr/bin/dsh-app-ui" \
          "$STAGE/var/jb/usr/lib/dsh/dsh-extras-postinst.sh" \

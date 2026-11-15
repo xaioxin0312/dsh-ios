@@ -8,16 +8,65 @@
 > 关于 Node 24.9：**（rc.1 时代的历史结论）** 当时公开可得的 iOS arm64 Node 可执行文件确实不存在（详见 [`docs/DSH-NODE-UPGRADE-EVALUATION.md`](docs/DSH-NODE-UPGRADE-EVALUATION.md)），但实证发现官方 `0.2.2-rc.1` 的四处 Node 22.12 兼容补丁锚点与 `0.2.1-rc.5` **逐字一致**，因此用同一套补丁 + 同一个已验证的 Node 22.12.0，做出了经 31 项核验（含真 boot、会话创建与恢复）的完整升级包。
 >
 > **⚠️ 2026-11-14 更正**：上面「不存在」的结论已被本仓库自己的 CI 推翻 —— GitHub Actions run `43532556241` 成功编译出 **Node v24.19.0 iOS arm64 独立 CLI**（artifact `14095226518` / Release `node24-exp`，SHA `8bebb2a2…`）。且 rc.3 的 `engines.node >= 24.9.0` **不是 advisory**（`bin.js` 用 `import.meta.main`）。故 rc.3 单包已改用该成品。首版 `+ios24` 在 A11 真机上暴露运行时不兼容，
-**当前推荐档位是 `+ios24.5` 正式版**（免终端自启 + 工作区/对话加载修复），
-详见下方「正式版 +ios24.5」章节与 `one-package/README.md`。
+**当前推荐档位是 `+ios24.6` 正式版**（图片支持 + 老对话 transport 修复 + 内置手机操控），
+详见下方「正式版 +ios24.6」章节与 `one-package/README.md`。
 
 ---
 
-## 正式版 · `+ios24.5`（2026-11-15，免终端自启 + 工作区/对话修复）
+## 正式版 · `+ios24.6`（2026-11-15，图片支持 + 内置手机操控）
 
 > 当前推荐安装的正式版。Release 附件：
-> `dev.airdevs.dsh_0.2.2-rc.3+ios24.5_iphoneos-arm64.deb`。
+> `dev.airdevs.dsh_0.2.2-rc.3+ios24.6_iphoneos-arm64.deb`。
 > 适用 iPhone X (A11, arm64) / iOS 15–16.7.x / Dopamine rootless (`/var/jb`)。
+
+### 图片支持（读取 + 上传，不依赖 sharp）
+
+| 症状 | 根因 | `+ios24.6` 修复 |
+| --- | --- | --- |
+| 老对话一发消息就 5/5 重试 `DeepSeek Messages transport failed`，新对话正常 | rc.3 的 `prepareImages()` 遍历历史里**每一张**图片调用 `readImageRequest()`，该链路依赖 sharp；iOS 包只有 sharp 的 JS 壳，任一历史图片都会在请求发出前抛错，被 adapter 统一包成 `TRANSPORT` | `--import` 预加载纯 JS 图片层：直接读 `attachments/v1` 对象并校验 sha256，完全绕开 sharp |
+| 上传图片失败 | `saveImages()` → `prepareImageFile()` → `detectImage()/normalizeImage()` 同样要 sharp | 纯 JS 解析 PNG/JPEG/GIF/WebP 头（宽高、alpha、动图、EXIF 方向）后直存原图，`saveImage/saveImages/validateImage` 全覆盖 |
+| 历史图片对象丢失后整轮失败 | `readImageRequest` 对缺失对象直接抛错 | 请求路径退化为 1x1 PNG 占位并写 `[dsh-ios]` 日志，会话可继续 |
+
+读取、请求、上传三条链路都在预加载层完成，只作用于 dsh 主进程，不影响
+pnpm / 插件子进程；验证：
+
+```sh
+grep -n -E 'dsh-ios|transport failed|sharp' /var/jb/var/log/dsh-app/dsh-daemon.err.log | tail -20
+# 正常应看到：image support active (pure-JS probe, no sharp): read/request/save
+```
+
+### 内置手机操控（DSH GO 的 iOS 等价实现）
+
+Android DSH GO 用 **AccessibilityService**：读无障碍节点树、按文本点按、
+输入、截图。iOS 没有公开等价 API，本包用 SpringBoard 常驻原生层
+（ios-mcp，AX 树 + IOHIDEvent 触控注入 + 截图 + OCR，`8090/mcp`）+ 本机
+bridge（`127.0.0.1:8091/mcp`，合并文件/App/进程/syslog 等工具）实现。
+两者都随 deb 安装，launchd 自启，MCP 在每次启动 DSH 前幂等注册。
+
+```sh
+dsh-phone-bridge-ctl status     # daemon / health / native / auto 四项
+dsh-phone-bridge-ctl tools      # 合并后的工具列表（mcp__ios__*）
+# 原生层（点按/滑动/输入/截图）需要 respring 一次才注入 SpringBoard
+```
+
+工具调用仍需在 DSH 里逐次确认；本包不会自动执行支付/密码/验证码操作。
+原生层监听 `0.0.0.0:8090` 且无认证（上游设计），不在可信局域网时用
+`dsh-phone-bridge-ctl native-off` + respring 停用，只保留 A 层工具。
+详见 [`phone-bridge/README.md`](phone-bridge/README.md)。
+
+### 安装
+
+```sh
+dpkg -i dev.airdevs.dsh_0.2.2-rc.3+ios24.6_iphoneos-arm64.deb
+respring   # 仅首次安装后需要，让原生触控层注入 SpringBoard
+```
+
+`+ios24.5` 的免终端自启、`+ios24.4` 的 corrupt 会话恢复、`+ios24.3` 的
+profile 核心包隔离、`+ios24.2` 的 zstd→none 全部保留。
+
+---
+
+## 上一版 · `+ios24.5`（2026-11-15，免终端自启 + 工作区/对话修复）
 
 ### 本版修复
 

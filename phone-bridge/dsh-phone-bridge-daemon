@@ -4,23 +4,20 @@
 # 由 dev.airdevs.dsh.phone-bridge.plist 以 mobile 身份拉起，RunAtLoad +
 # KeepAlive，因此「终端被杀 / DSH 重启 / bridge 崩溃」后工具链都还在。
 #
-# 只做一件事：exec 进纯 Node 的 MCP server，零 JIT 档（A11 上 undici/llhttp
-# WASM 会在默认档 SIGBUS），exec 保证 launchd 管住唯一 PID。
+# 只做一件事：exec 进纯 Node 的 MCP server，零 JIT 档（A11 上默认档的 JIT
+# 编译会 SIGBUS），exec 保证 launchd 管住唯一 PID。
 #
-# 硬约束：绝不写 $DSH_HOME。旧版在这里 mkdir "$DSH_HOME/logs"，并自动跑
-# `ensure-config.cjs "$DSH_HOME" on` 往 cordis.patch.yml 注入 MCP 块 —— 后者
-# 等于改写用户已有的插件配置，和用户「对话/工作区/插件一个字节都不变」冲突。
-# 需要注册 MCP 时由用户显式执行 dsh-phone-bridge-ctl config-on（按需、可逆），
-# daemon 不再自动做。日志统一放 jbroot 系统日志区。
+# +ios24.6：不再手写 --no-expose-wasm（Node 24 / V8 13.x 已删除该 flag，
+# 传了直接 `bad option` 退出 9，daemon 永远起不来），统一走 node-safe。
+# MCP 注册由 dsh wrapper 在每次启动 DSH 时以 mobile 身份幂等完成，daemon
+# 本身仍绝不写 $DSH_HOME；日志统一放 jbroot 系统日志区。
 JB=/var/jb
 D="$JB/usr/lib/dsh"
 BR="$JB/usr/lib/dsh-phone-bridge"
-NODE="$D/bin/node"
+NODE_SAFE="$D/node-safe"
 HOME="${HOME:-/var/mobile}"; export HOME
 DSH_HOME="${DSH_HOME:-$JB/var/mobile/.dsh}"; export DSH_HOME
 PATH="$JB/usr/bin:$JB/bin:/usr/bin:/bin:/usr/sbin:/sbin"; export PATH
 mkdir -p "$JB/var/log/dsh-app" 2>/dev/null || true
 
-# shellcheck disable=SC2086
-exec "$NODE" --jitless --no-expose-wasm --require "$D/fetch-shim.cjs" \
-     --expose-internals "$BR/server.cjs"
+exec "$NODE_SAFE" --expose-internals "$BR/server.cjs"

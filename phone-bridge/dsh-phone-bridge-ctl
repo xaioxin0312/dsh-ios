@@ -13,10 +13,11 @@ JB=/var/jb
 LABEL=dev.airdevs.dsh.phone-bridge
 PLIST="$JB/Library/LaunchDaemons/$LABEL.plist"
 BR="$JB/usr/lib/dsh-phone-bridge"
-NODE="$JB/usr/lib/dsh/bin/node"
+NODE_SAFE="$JB/usr/lib/dsh/node-safe"
 PORT="${DSH_BRIDGE_PORT:-8091}"
+NATIVE_PORT="${DSH_IOS_MCP_PORT:-8090}"
 DSHHOME="${DSH_HOME:-$JB/var/mobile/.dsh}"
-LOGDIR="$DSHHOME/logs"
+LOGDIR="$JB/var/log/dsh-app"
 
 find_launchctl() {
     for c in "$JB/usr/bin/launchctl" "$JB/bin/launchctl" /usr/bin/launchctl /bin/launchctl; do
@@ -26,10 +27,10 @@ find_launchctl() {
 }
 LC=$(find_launchctl 2>/dev/null || true)
 
-# 用包内 node 发 HTTP，不依赖 curl / nc
+# 用包内 node 发 HTTP，不依赖 curl / nc（Node 24 + A11 必须零 JIT）
 health() {
-    [ -x "$NODE" ] || return 1
-    "$NODE" -e '
+    [ -x "$NODE_SAFE" ] || return 1
+    "$NODE_SAFE" -e '
       const http=require("http");
       const req=http.get({host:"127.0.0.1",port:Number(process.argv[1]),path:"/health",timeout:1500},r=>{
         let b=""; r.on("data",c=>b+=c); r.on("end",()=>{
@@ -69,14 +70,57 @@ do_bootout() {
 }
 
 config() {
-    [ -x "$NODE" ] && [ -f "$BR/ensure-config.cjs" ] || { echo "缺 ensure-config.cjs" >&2; return 1; }
-    "$NODE" "$BR/ensure-config.cjs" "$DSHHOME" "$1"
+    [ -x "$NODE_SAFE" ] && [ -f "$BR/ensure-config.cjs" ] || { echo "缺 ensure-config.cjs / node-safe" >&2; return 1; }
+    case "$1" in
+        off) mkdir -p "$DSHHOME" 2>/dev/null || true; : > "$DSHHOME/.phone-bridge-no-auto-config" 2>/dev/null || true ;;
+        on)  rm -f "$DSHHOME/.phone-bridge-no-auto-config" 2>/dev/null || true ;;
+    esac
+    "$NODE_SAFE" "$BR/ensure-config.cjs" "$DSHHOME" "$1"
+}
+
+# 原生层启停（改文件名，respring 后生效）。上游 ios-mcp 的监听地址是
+# INADDR_ANY(0.0.0.0:8090) 且无认证，不在可信局域网时可先停用，仅保留
+# bridge 的 A 层工具。
+native_toggle() {
+    DL="$JB/Library/MobileSubstrate/DynamicLibraries"
+    case "$1" in
+        off)
+            if [ -f "$DL/dsh-ios-control.dylib" ]; then
+                mv "$DL/dsh-ios-control.dylib" "$DL/dsh-ios-control.dylib.disabled"
+                [ -f "$DL/dsh-ios-control.plist" ] && mv "$DL/dsh-ios-control.plist" "$DL/dsh-ios-control.plist.disabled"
+                echo "原生层已停用；respring（或重启越狱）后 8090 不再监听。"
+            else
+                echo "原生层已是停用状态。"
+            fi ;;
+        on)
+            if [ -f "$DL/dsh-ios-control.dylib.disabled" ]; then
+                mv "$DL/dsh-ios-control.dylib.disabled" "$DL/dsh-ios-control.dylib"
+                [ -f "$DL/dsh-ios-control.plist.disabled" ] && mv "$DL/dsh-ios-control.plist.disabled" "$DL/dsh-ios-control.plist"
+                echo "原生层已启用；respring（或重启越狱）后生效。"
+            else
+                echo "原生层已是启用状态。"
+            fi ;;
+    esac
+}
+
+# 原生层（SpringBoard 内的 ios-mcp，8090）是否已加载。只有 respring/重启后
+# 才会出现；bridge 的 B 层工具（点按/滑动/输入/截图/AX 树）依赖它。
+native_up() {
+    [ -x "$NODE_SAFE" ] || return 1
+    "$NODE_SAFE" -e '
+      const net=require("net");
+      const s=net.connect({host:"127.0.0.1",port:Number(process.argv[1])});
+      const done=(ok)=>{try{s.destroy()}catch(_){};process.exit(ok?0:1)};
+      s.setTimeout(1200,()=>done(false));
+      s.on("connect",()=>done(true));
+      s.on("error",()=>done(false));
+    ' "$NATIVE_PORT"
 }
 
 # 直接在设备上列出当前可用工具（诊断用；DSH 自己会通过 MCP 拿同一份列表）
 list_tools() {
-    [ -x "$NODE" ] || return 1
-    "$NODE" -e '
+    [ -x "$NODE_SAFE" ] || return 1
+    "$NODE_SAFE" -e '
       const http=require("http");
       const body=JSON.stringify({jsonrpc:"2.0",id:1,method:"tools/list",params:{}});
       const req=http.request({host:"127.0.0.1",port:Number(process.argv[1]),path:"/mcp",method:"POST",
@@ -101,8 +145,18 @@ case "${1:-status}" in
         P=$(bridge_pid 2>/dev/null || true)
         if [ -n "$P" ]; then echo "daemon:  已运行 (PID=$P, launchd KeepAlive)"; else echo "daemon:  未运行"; fi
         if H=$(health 2>/dev/null); then echo "health:  $H"; else echo "health:  不可连（127.0.0.1:$PORT）"; fi
-        config status 2>/dev/null | "$NODE" -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>{try{const j=JSON.parse(s);j.results.forEach(r=>console.log("patch:   "+r.file+" registered="+r.registered+" valid="+r.valid))}catch(_){}})' 2>/dev/null || true
+        if [ -f "$JB/Library/MobileSubstrate/DynamicLibraries/dsh-ios-control.dylib" ]; then
+            echo "native:  已安装（dylib 在位）"
+        else
+            echo "native:  已停用（dylib.disabled）"
+        fi
+        if native_up 2>/dev/null; then echo "listen:  已加载（127.0.0.1:$NATIVE_PORT，点按/滑动/输入/截图可用）"; else echo "listen:  未加载（respring 或重启越狱后生效；当前仅本机 A 层工具）"; fi
+        if [ -f "$DSHHOME/.phone-bridge-no-auto-config" ]; then echo "auto:    已关闭（删掉 $DSHHOME/.phone-bridge-no-auto-config 或 config-on 恢复）"; else echo "auto:    开启（每次启动 DSH 幂等注册 MCP）"; fi
+        config status 2>/dev/null | "$NODE_SAFE" -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>{try{const j=JSON.parse(s);j.results.forEach(r=>console.log("patch:   "+r.file+" registered="+r.registered+" valid="+r.valid))}catch(_){}})' 2>/dev/null || true
         ;;
+    native)  native_up && echo "native 8090 已加载" || { echo "native 8090 未加载（respring 一次）"; exit 1; } ;;
+    native-on)  native_toggle on ;;
+    native-off) native_toggle off ;;
     enable)  do_bootstrap && echo "phone-bridge 已启用（RunAtLoad + KeepAlive）" || echo "启用未即时生效，越狱重启后会自动 RunAtLoad" ;;
     disable) do_bootout && echo "phone-bridge 已停用" ;;
     config-on)     config on ;;
@@ -113,5 +167,5 @@ case "${1:-status}" in
             [ -f "$f" ] && { echo "--- $f ---"; tail -40 "$f"; }
         done ;;
     tools)   list_tools ;;
-    *) echo "用法: dsh-phone-bridge-ctl status|health|enable|disable|config-on|config-off|config-status|log|tools" >&2; exit 64 ;;
+    *) echo "用法: dsh-phone-bridge-ctl status|health|native|native-on|native-off|enable|disable|config-on|config-off|config-status|log|tools" >&2; exit 64 ;;
 esac

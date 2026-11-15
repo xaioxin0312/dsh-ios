@@ -1,10 +1,14 @@
 #!/bin/sh
 # 单包 extras：APP 签名 / 图标注册 / **全屏 Web Clip** / launchd 保活。
 #
-# 硬约束：绝不写 $DSH_HOME。旧版在这里 mkdir/chown -R $DSHHOME、跑
+# 硬约束：安装期绝不写 $DSH_HOME。旧版在这里 mkdir/chown -R $DSHHOME、跑
 # `dsh-phone-bridge-ctl config-on`（改写 cordis.patch.yml）、写
 # profiles/web/.npmrc 与 .dsh-market/state.json —— 全部已移除。
 # 用户已有的对话、工作区、插件、npm 源、插件市场区域设置一律保留。
+#
+# +ios24.6：手机操控 MCP 的注册改到 dsh wrapper 里做 —— 每次启动 DSH 前
+# 以当前用户（launchd = mobile）幂等追加一条 id 固定的 mcp-client，其它
+# 插件行原样保留；安装脚本本身仍然一个字节都不碰用户数据。
 #
 # +ios24.1 升级修复（真机 401 黑屏根因）：
 #   旧版只跑 `dsh-app-ctl enable`，其 do_bootstrap 里的 kickstart 不带 -k。
@@ -57,7 +61,7 @@ fi
 # 日志在 jbroot 系统区，绝不 mkdir/chown $DSH_HOME/logs。
 mkdir -p "$LOGDIR" 2>/dev/null || true
 
-# 手机操控 bridge：只启动服务，绝不 config-on（那会改写用户插件配置）。
+# 手机操控 bridge：只启动服务；MCP 注册由 dsh wrapper 在启动前幂等完成。
 if [ -x "$BRCTL" ]; then "$BRCTL" enable >/dev/null 2>&1 || true; fi
 
 # 真探活：只认 303（固定 token 换 cookie）或 200（已有会话），401 一律失败。

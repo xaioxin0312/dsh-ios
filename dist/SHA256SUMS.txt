@@ -182,6 +182,38 @@ e3416f563d1f4f8957054eaf5a2db4001bfe59df36b7be302c58dabd5b03b2a7  fix-ios24.sh
 #   目标 755 且 shebang #!/bin/sh；包内文本无 /var/jb/bin/sh 引用。
 bce5bf18cf3417110b47fa651001331a8cf87ebe7d9a23c5db73b6baaee7497d  dev.airdevs.dsh_0.2.2-rc.3+ios24.5_iphoneos-arm64.deb
 
+# --- rc.3 + Node v24.19.0（推荐正式版 · A11 第七轮：图片支持 + 内置手机操控）---
+# 2026-11-15：老对话一发消息就 5/5 重试 DeepSeek Messages transport failed，
+#   新对话正常。根因：dsh-llm-deepseek 的 prepareImages() 会遍历历史里每一张
+#   图片调用 attachment-local 的 readImageRequest()，该链路依赖 sharp 原生库；
+#   iOS 包只有 sharp 的 JS 壳（sharp/package.json 在，@img/* 与 .node 全缺），
+#   任一历史图片都会在请求发出前抛错，被 generate() 统一包成
+#   LlmError("DeepSeek Messages transport failed","TRANSPORT")。
+#   上传侧的 saveImages→prepareImageFile→detectImage/normalizeImage 同样要
+#   sharp，所以「图片支持」一直是坏的。
+# 修复：新增 one-package/ios-image-shim.mjs，由 dsh wrapper 的两条 node 启动
+#   行以 --import 预加载，替换 LocalAttachmentStore 的
+#   readImage/readImageRequest/saveImage/saveImages/validateImage：
+#   - 纯 JS 解析 PNG/JPEG/GIF/WebP 头（宽高 / alpha / 动图 / EXIF 方向）；
+#   - 读取直读 attachments/v1 对象并校验 sha256，完全绕开 sharp；
+#   - 上传直存原图（不解码-缩放-重编码），inline 上限 20 MiB；
+#   - 对象缺失/损坏时请求路径退化为 1x1 PNG 占位，老会话不再整轮失败。
+# 同轮加入手机操控（DSH GO 的 iOS 等价实现）：随包安装 ios-mcp 1.2.8 原生层
+#   （MIT，AX 树 / IOHIDEvent 点按滑动输入 / 截图 / OCR，0.0.0.0:8090/mcp）
+#   + phone-bridge（127.0.0.1:8091/mcp，合并本机文件/App/进程/syslog 工具）；
+#   launchd 自启；dsh wrapper 每次启动前以 mobile 身份幂等注册 MCP；
+#   phone-bridge daemon 改走 node-safe（原 --no-expose-wasm 在 Node 24 是
+#   bad option(9)，服务根本起不来）；ctl 新增 native/native-off/status。
+# 保留 +ios24.5 的 launchd 免终端自启、+ios24.4 的 corrupt 会话恢复、
+#   +ios24.3 的 profile 核心包隔离、+ios24.2 的 zstd→none 与 browse。
+# 构建：以 +ios24.5 交付树为基线，新增/替换 ios-image-shim.mjs、dsh wrapper、
+#   phone-bridge 全套、control 描述；SOURCE_DATE_EPOCH=1700000000，
+#   dpkg-deb -Zgzip -z9。
+# 核验：打包后 shade 测试 save/read/request/占位/格式探测全过；ensure-config
+#   幂等（第二次 action=unchanged）；plistlib 解析两个 launchd plist 通过；
+#   dylib 为 Mach-O 64-bit arm64。
+9cb3919870a0c5bd0ad8fa0bee3a5bb28061a6dab4e39aafa3e69358f2c320fa  dev.airdevs.dsh_0.2.2-rc.3+ios24.6_iphoneos-arm64.deb
+
 # --- 可选生态插件（手动安装，不预装）---
 f9f74e0f485148acfe544b88e35c17da196b6ff4c6da4f7a6576a7c566cd068a  dsh-ios-phone-control-0.1.0.tgz
 
