@@ -1,0 +1,29 @@
+name: build-native-app
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'app-bundle/native-ui/**'
+      - 'app-bundle/payload/var/jb/Applications/DSH.app/Info.plist'
+      - '.github/workflows/build-native-app.yml'
+
+jobs:
+  app:
+    runs-on: macos-15 # arm64 (M1)；macos-14 标签已下线（2026-11 实测不可用）
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ldid
+        run: brew install ldid
+      - name: Build DSHNativeApp (UIKit, arm64)
+        run: |
+          set -eux
+          sh app-bundle/native-ui/build-native-app.sh "$PWD/DSHNativeApp"
+          lipo -info DSHNativeApp
+          ls -l DSHNativeApp
+          shasum -a 256 DSHNativeApp
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DSHNativeApp
+          path: DSHNativeApp
+          if-no-files-found: error

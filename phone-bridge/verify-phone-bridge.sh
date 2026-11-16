@@ -223,7 +223,8 @@ grep -qF 'isConflictingIosBlock' "$BR/ensure-config.cjs" \
 grep -qF 'hud_diag' "$BR/dsh-phone-bridge-ctl" \
     && ok 'ctl 含 hud 诊断命令' || bad 'ctl 缺 hud 诊断命令'
 HMSRC="$BR/native/hud/HUDOverlay.m"
-for needle in 'hud.ack.json' 'kDSHDefaultLevel' 'connectedScenes' 'alpha = 0.62'; do
+# +ios24.10：药丸形态（verbLabel / shape=pill / pill_w 几何 / 纯黑 alpha 0.97）
+for needle in 'hud.ack.json' 'kDSHDefaultLevel' 'connectedScenes' 'verbLabel' 'shape' 'pill_w' 'colorWithWhite:0.02 alpha:0.97'; do
     grep -qF "$needle" "$HMSRC" && ok "HUD 源码含 $needle" || bad "HUD 源码缺 $needle"
 done
 HDYL="$BR/native/hud/dsh-ios-hud.dylib"

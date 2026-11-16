@@ -92,9 +92,47 @@ let snapshot = {
     seq: 0, ts: Date.now(), state: 'idle', title: 'DSH 就绪',
     detail: '等待任务', tool: '', action: '', step: 0, total: 0,
     elapsed_ms: 0, ok: null, run_id: '', ttl_ms: 0,
+    verb: '待命', recent: [],
     control: publicControlState()
 };
 let idleSince = Date.now();
+
+/* +ios24.10：灵动岛人话状态（对齐 DSH Go / codex-android 的 StatusLines）。
+ * 内部 tool/action/detail 是给模型看的紧凑技术串，直接塞进灵功岛又长又难读。
+ * 这里折叠成「看屏幕 / 点发送 / 正在输入 / 等待确认 / 已暂停」这类人话短句，
+ * HUD 药丸与 Web 面板共用同一份 verb，保证两端文案一致。 */
+const VERB_ACTIONS = {
+    screen: '看屏幕', tap: '点按', type: '输入中', swipe: '滑动', key: '按键',
+    home: '回主屏', open: '打开', wait: '等待', settle: '等待界面', ocr: '识别',
+    validate: '准备', done: '完成', tool_start: '调用工具', handoff: '等待确认',
+    find_element: '查找元素', wait_text: '等待文字', collect: '收集列表',
+    intent: '意图直达', skill: '技能重放', batch: '批量执行', stop: '已停止',
+    pause: '已暂停', resume: '已继续', interject: '插话'
+};
+function humanVerb(state, tool, action, detail) {
+    if (state === 'paused') return '已暂停';
+    if (state === 'error' || state === 'failed') return '出错了';
+    if (state === 'done') return '已完成';
+    if (state === 'waiting') {
+        if (controlState.handoff) return '等待你操作';
+        return '等待界面';
+    }
+    if (state === 'idle' || state === 'ready') return '待命';
+    // running / thinking
+    const base = VERB_ACTIONS[action] || VERB_ACTIONS[tool] || '';
+    const d = String(detail || '').slice(0, 24);
+    if (base && d && d !== base && !d.startsWith(base)) return base + ' · ' + d;
+    return base || d || '执行中';
+}
+/* 最近操作：灵动岛展开态 / 面板折叠列表用，最多 3 条 */
+const recentOps = [];
+function noteRecent(v, st) {
+    if (!v || v === '待命' || st === 'idle') return;
+    const last = recentOps[recentOps.length - 1];
+    if (last && last.v === v) return;   // 合并连续重复
+    recentOps.push({ v, t: Date.now(), ok: st === 'error' || st === 'failed' ? false : (st === 'done' ? true : null) });
+    while (recentOps.length > 3) recentOps.shift();
+}
 
 function hudCompatibleState(state) {
     // 原生 HUD 只认 running / error / 其它；把细分状态折叠过去。
@@ -120,6 +158,8 @@ function emitEvent(state, detail, extra) {
     if (st === 'done' || st === 'error' || st === 'failed' || st === 'idle') hudStart = 0;
     if (st === 'idle') idleSince = now;
 
+    const verb = humanVerb(st, e.tool, e.action, detail);
+    noteRecent(verb, st);
     snapshot = {
         seq: ++eventSeq,
         ts: now,
@@ -133,6 +173,9 @@ function emitEvent(state, detail, extra) {
         elapsed_ms: hudStart ? now - hudStart : 0,
         ok: e.ok === undefined ? null : !!e.ok,
         run_id: e.run_id || ('r' + (runSeq || 1)),
+        // +ios24.10：人话状态与最近操作，灵动岛药丸与 Web 面板共用。
+        verb,
+        recent: recentOps.slice(),
         // +ios24.9：进度面板据此渲染暂停/停止/交还确认卡，不必额外轮询。
         control: publicControlState(),
         // done/error 的 ttl 必须大于心跳间隔(2000ms)，否则旧版 HUD 会在
@@ -144,10 +187,15 @@ function emitEvent(state, detail, extra) {
 
     // 原生 HUD：保持旧字段结构 + 常驻态（idle 也写，且 ttl 极长）
     writeHud({
-        v: 2,
+        v: 3,
         state: hudCompatibleState(st),
         title: snapshot.title,
         detail: snapshot.detail.slice(0, 90),
+        // +ios24.10：灵动岛药丸读 verb 做主文案，recent 做展开态。
+        verb: verb,
+        recent: recentOps.slice(),
+        paused: controlState.paused,
+        handoff: controlState.handoff ? String(controlState.handoff.reason || '') : '',
         step: snapshot.step,
         total: snapshot.total,
         elapsed_ms: snapshot.elapsed_ms,
@@ -181,7 +229,8 @@ function hudPublish(state, detail, extra) {
  */
 function writeIdleHud() {
     writeHud({
-        v: 2, state: 'idle', title: 'DSH 就绪', detail: '等待任务 · 桥已连接',
+        v: 3, state: 'idle', title: 'DSH 就绪', detail: '等待任务 · 桥已连接',
+        verb: '待命', recent: recentOps.slice(), paused: false, handoff: '',
         step: 0, total: 0, elapsed_ms: 0,
         ts: Date.now(), ttl_ms: 86400000, level: HUD_LEVEL, seq: eventSeq
     });

@@ -1,28 +1,35 @@
 /*
- * dsh-ios-hud —— SpringBoard 常驻实时进度胶囊（+ios24.8 可见性修复）。
+ * dsh-ios-hud —— SpringBoard 常驻「灵动岛药丸」实时进度（+ios24.10）。
  *
  * bridge（8091）把每个工具调用的状态原子写入
  *   /var/mobile/Library/DSH/hud.json
- * 本 dylib 以 150ms 轮询该文件，把状态画到屏幕顶部。
+ * 本 dylib 以 150ms 轮询该文件，把状态画成一颗落在灵动岛位置的纯黑药丸。
  *
- * +ios24.8 修复真机「HUD 完全不可见，一个像素都没有」的三个确定性根因：
- *   1) 旧版初始 alpha=0 且只有 poll 到事件才 apply —— 没有事件/文件读不到时
- *      窗口恒透明，用户连「HUD 到底注入没有」都判断不了。现在启动时就画一个
- *      低亮度「DSH 待命」常驻胶囊，加载成功即肉眼可见。
- *   2) 旧版 windowLevel=2000，被灵动岛/Dynamic Island 类插件的高层窗口盖住。
- *      现在默认 1e6 级别，并支持 hud.json 里 `level` 字段动态覆盖。
- *   3) 旧版只取 activeScene，全屏 Web Clip 在前台时 SpringBoard 自己的 scene
- *      未必 foregroundActive，拿不到 scene 就永远不建窗口。现在遍历所有
- *      connectedScenes 各建一个窗口，并保留「无 scene 时用 mainScreen 兜底」。
+ * 为什么要自绘药丸而不是只靠系统 Live Activity：
+ *   - iOS 上「内容进灵动岛」只有 ActivityKit Live Activity 一条正路，但它
+ *     后台更新必须走 APNs push，而我们是没有推送证书的本地 bridge；App 一
+ *     退后台，岛就冻结在最后状态。
+ *   - 本 dylib 注入在 SpringBoard 进程，150ms 直接读文件刷新，不依赖 App
+ *     前后台、不依赖推送、不依赖签名 entitlement —— 是「操控手机时始终能
+ *     在岛上看到实时进度」唯一可控的通道。
+ *   - 与用户已开启的灵动岛插件并存：默认把药丸画在岛位置（可用 hud.json
+ *     的 pill_y / pill_w / pill_h 覆盖微调）。
  *
- * 另外写回一个 ack 文件（/var/mobile/Library/DSH/hud.ack.json），记录
- * 本 dylib 已加载、建了几个窗口、windowLevel、最后一次成功读到状态的时间，
- * 供 `dsh-phone-bridge-ctl hud` 直接判断「没注入 / 注入了但被遮挡 / 读不到文件」。
+ * +ios24.8 修的「完全不可见」三根因继续保留：
+ *   1) 启动即画低亮度待命药丸，不再等事件才显示；
+ *   2) windowLevel 默认 1e6（hud.json.level 可覆盖），盖过普通窗口；
+ *   3) 遍历所有 connectedScenes 建窗，无 scene 时用 mainScreen 兜底。
  *
- * 设计约束：
- *   - 不注册 MCP、不开端口，只读一个文件，HUD 挂掉不影响操控链路。
- *   - window 的 hitTest 恒返回 nil，绝不拦截触摸。
- *   - 进度主通道是 DSH Web UI 内的面板；本胶囊只是跨 App 兜底。
+ * 形态（+ios24.10）：
+ *   - 紧凑态：纯黑胶囊（约 168×36，圆角=高/2），落在顶部中央岛位置，
+ *     显示状态点 + verb 人话动作（看屏幕 / 点按 / 输入中 / 等待你操作…）
+ *     + 第 n/N 步，底部一条细进度线。
+ *   - 展开态：state=paused / handoff 非空时展开为宽卡（约 300×72），
+ *     多显示一行 detail / 交还原因，配合原生 App 的确认卡。
+ *   - 待命态：灰色小胶囊「DSH 待命」，常驻不淡出。
+ *
+ * 设计约束：不注册 MCP、不开端口、只读一个文件；hitTest 恒 nil 不拦触摸；
+ * 写回 hud.ack.json 供 `dsh-phone-bridge-ctl hud` 自检（含药丸几何与阶段）。
  */
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
@@ -36,13 +43,13 @@ static CGFloat   const kDSHDefaultLevel = 1000000.0;  // 盖过灵动岛插件
 
 @interface DSHHUDView : UIView
 @property (nonatomic, strong) UIView *dot;
-@property (nonatomic, strong) UILabel *titleLabel;
-@property (nonatomic, strong) UILabel *detailLabel;
-@property (nonatomic, strong) UILabel *metaLabel;
+@property (nonatomic, strong) UILabel *verbLabel;   // 人话动作（主文案）
+@property (nonatomic, strong) UILabel *metaLabel;   // 第 n/N 步 · 耗时
+@property (nonatomic, strong) UILabel *detailLabel; // 展开态明细
 @property (nonatomic, strong) UIView *progressTrack;
 @property (nonatomic, strong) UIView *progressBar;
 @property (nonatomic, assign) CGFloat progress;
-@property (nonatomic, assign) BOOL running;
+@property (nonatomic, assign) BOOL expanded;
 @property (nonatomic, strong) NSTimer *pulseTimer;
 @property (nonatomic, assign) CGFloat pulsePhase;
 @end
@@ -52,44 +59,46 @@ static CGFloat   const kDSHDefaultLevel = 1000000.0;  // 盖过灵动岛插件
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (!self) return nil;
-    self.backgroundColor = [UIColor colorWithWhite:0.04 alpha:0.90];
-    self.layer.cornerRadius = 20;
+    // 纯黑药丸，贴合灵动岛质感。
+    self.backgroundColor = [UIColor colorWithWhite:0.02 alpha:0.97];
+    self.layer.cornerRadius = frame.size.height / 2.0;
     self.layer.cornerCurve = kCACornerCurveContinuous;
     self.layer.masksToBounds = YES;
     self.layer.borderWidth = 0.5;
-    self.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.12].CGColor;
+    self.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.08].CGColor;
     self.userInteractionEnabled = NO;
 
-    _dot = [[UIView alloc] initWithFrame:CGRectMake(14, 16, 8, 8)];
-    _dot.backgroundColor = [UIColor colorWithRed:0.20 green:0.78 blue:0.35 alpha:1.0];
+    _dot = [[UIView alloc] initWithFrame:CGRectMake(15, 0, 8, 8)];
+    _dot.backgroundColor = [UIColor colorWithWhite:0.55 alpha:1.0];
     _dot.layer.cornerRadius = 4;
     [self addSubview:_dot];
 
-    _titleLabel = [[UILabel alloc] initWithFrame:CGRectZero];
-    _titleLabel.font = [UIFont systemFontOfSize:11.5 weight:UIFontWeightSemibold];
-    _titleLabel.textColor = [UIColor whiteColor];
-    _titleLabel.text = @"DSH 就绪";
-    [self addSubview:_titleLabel];
-
-    _detailLabel = [[UILabel alloc] initWithFrame:CGRectZero];
-    _detailLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightRegular];
-    _detailLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.70];
-    _detailLabel.text = @"等待任务 · 桥已连接";
-    [self addSubview:_detailLabel];
+    _verbLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+    _verbLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+    _verbLabel.textColor = [UIColor whiteColor];
+    _verbLabel.text = @"DSH 待命";
+    _verbLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+    [self addSubview:_verbLabel];
 
     _metaLabel = [[UILabel alloc] initWithFrame:CGRectZero];
     _metaLabel.font = [UIFont monospacedDigitSystemFontOfSize:10.5 weight:UIFontWeightMedium];
-    _metaLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.62];
+    _metaLabel.textColor = [UIColor colorWithWhite:0.62 alpha:1.0];
     _metaLabel.textAlignment = NSTextAlignmentRight;
     [self addSubview:_metaLabel];
 
+    _detailLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+    _detailLabel.font = [UIFont systemFontOfSize:10.5 weight:UIFontWeightRegular];
+    _detailLabel.textColor = [UIColor colorWithWhite:0.72 alpha:1.0];
+    _detailLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+    _detailLabel.hidden = YES;
+    [self addSubview:_detailLabel];
+
     _progressTrack = [[UIView alloc] initWithFrame:CGRectZero];
-    _progressTrack.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.14];
+    _progressTrack.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.12];
     _progressTrack.layer.cornerRadius = 1;
     [self addSubview:_progressTrack];
-
     _progressBar = [[UIView alloc] initWithFrame:CGRectZero];
-    _progressBar.backgroundColor = [UIColor colorWithRed:0.20 green:0.78 blue:0.35 alpha:1.0];
+    _progressBar.backgroundColor = [UIColor colorWithRed:0.20 green:0.78 blue:0.62 alpha:1.0];
     _progressBar.layer.cornerRadius = 1;
     [_progressTrack addSubview:_progressBar];
 
@@ -100,15 +109,34 @@ static CGFloat   const kDSHDefaultLevel = 1000000.0;  // 盖过灵动岛插件
     [super layoutSubviews];
     CGFloat h = CGRectGetHeight(self.bounds);
     CGFloat w = CGRectGetWidth(self.bounds);
-    self.dot.center = CGPointMake(19, h * 0.5 - 4);
-    CGFloat textLeft = 32;
-    CGFloat metaW = 74;
-    CGFloat textW = MAX(60, w - textLeft - metaW - 12);
-    self.titleLabel.frame = CGRectMake(textLeft, 6, textW, 14);
-    self.detailLabel.frame = CGRectMake(textLeft, 20, textW, 14);
-    self.metaLabel.frame = CGRectMake(w - metaW - 12, 15, metaW, 14);
-    self.progressTrack.frame = CGRectMake(12, h - 4, w - 24, 2);
+    self.layer.cornerRadius = h / 2.0;
+
+    CGFloat dotX = 15;
+    CGFloat left = dotX + 8 + 8;             // 点右侧
+    CGFloat metaW = 66;
+    if (self.expanded) {
+        // 展开态：verb 独占第一行，detail 第二行，meta 右上，进度条底部。
+        self.dot.center = CGPointMake(dotX + 4, 20);
+        self.verbLabel.frame = CGRectMake(left, 10, w - left - 12, 18);
+        self.metaLabel.frame = CGRectMake(w - metaW - 14, 12, metaW, 16);
+        self.detailLabel.hidden = NO;
+        self.detailLabel.frame = CGRectMake(left, 36, w - left - 14, 16);
+        self.progressTrack.frame = CGRectMake(16, h - 6, w - 32, 2);
+    } else {
+        // 紧凑态：单行 verb + 右侧 meta，进度条贴底。
+        self.dot.center = CGPointMake(dotX + 4, h / 2.0);
+        self.verbLabel.frame = CGRectMake(left, (h - 18) / 2.0 - 1, w - left - metaW - 8, 18);
+        self.metaLabel.frame = CGRectMake(w - metaW - 14, (h - 16) / 2.0, metaW, 16);
+        self.detailLabel.hidden = YES;
+        self.progressTrack.frame = CGRectMake(28, h - 4, w - 56, 2);
+    }
     [self setProgress:self.progress];
+}
+
+- (void)setExpanded:(BOOL)e {
+    if (_expanded == e) return;
+    _expanded = e;
+    [self setNeedsLayout];
 }
 
 - (void)setProgress:(CGFloat)p {
@@ -131,7 +159,6 @@ static CGFloat   const kDSHDefaultLevel = 1000000.0;  // 盖过灵动岛插件
         } completion:nil];
     }];
 }
-
 - (void)stopPulse {
     [self.pulseTimer invalidate];
     self.pulseTimer = nil;
@@ -140,29 +167,31 @@ static CGFloat   const kDSHDefaultLevel = 1000000.0;  // 盖过灵动岛插件
 }
 
 - (void)applyState:(NSString *)state idle:(BOOL)idle {
-    self.running = [state isEqualToString:@"running"];
     if (idle) {
         [self stopPulse];
         self.dot.backgroundColor = [UIColor colorWithWhite:0.55 alpha:1.0];
         self.progressBar.backgroundColor = [UIColor colorWithWhite:0.55 alpha:1.0];
-    } else if (self.running) {
-        self.dot.backgroundColor = [UIColor colorWithRed:0.20 green:0.78 blue:0.35 alpha:1.0];
-        self.progressBar.backgroundColor = [UIColor colorWithRed:0.20 green:0.78 blue:0.35 alpha:1.0];
+    } else if ([state isEqualToString:@"running"] || [state isEqualToString:@"thinking"]) {
+        self.dot.backgroundColor = [UIColor colorWithRed:0.20 green:0.78 blue:0.62 alpha:1.0];
+        self.progressBar.backgroundColor = [UIColor colorWithRed:0.20 green:0.78 blue:0.62 alpha:1.0];
         [self startPulse];
-    } else if ([state isEqualToString:@"error"]) {
+    } else if ([state isEqualToString:@"paused"]) {
+        [self stopPulse];
+        self.dot.backgroundColor = [UIColor colorWithRed:0.88 green:0.65 blue:0.23 alpha:1.0];
+        self.progressBar.backgroundColor = [UIColor colorWithRed:0.88 green:0.65 blue:0.23 alpha:1.0];
+    } else if ([state isEqualToString:@"error"] || [state isEqualToString:@"failed"]) {
         [self stopPulse];
         self.dot.backgroundColor = [UIColor colorWithRed:1.0 green:0.27 blue:0.23 alpha:1.0];
         self.progressBar.backgroundColor = [UIColor colorWithRed:1.0 green:0.27 blue:0.23 alpha:1.0];
     } else {
         [self stopPulse];
-        self.dot.backgroundColor = [UIColor colorWithRed:0.20 green:0.78 blue:0.35 alpha:1.0];
-        self.progressBar.backgroundColor = [UIColor colorWithRed:0.20 green:0.78 blue:0.35 alpha:1.0];
+        self.dot.backgroundColor = [UIColor colorWithRed:0.20 green:0.78 blue:0.62 alpha:1.0];
+        self.progressBar.backgroundColor = [UIColor colorWithRed:0.20 green:0.78 blue:0.62 alpha:1.0];
     }
 }
 
 // 永不拦截触摸
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event { return nil; }
-
 @end
 
 #pragma mark - 控制器
@@ -178,6 +207,12 @@ static CGFloat   const kDSHDefaultLevel = 1000000.0;  // 盖过灵动岛插件
 @property (nonatomic, assign) NSTimeInterval lastApplyAt;
 @property (nonatomic, assign) BOOL idleMode;
 @property (nonatomic, assign) CGFloat level;
+// 药丸几何（hud.json 可覆盖）
+@property (nonatomic, assign) CGFloat pillY;      // 顶部 Y（默认贴 status bar）
+@property (nonatomic, assign) CGFloat pillW;      // 紧凑宽度
+@property (nonatomic, assign) CGFloat pillH;      // 紧凑高度
+@property (nonatomic, assign) CGFloat pillExpandW;
+@property (nonatomic, assign) CGFloat pillExpandH;
 @end
 
 @implementation DSHHUD
@@ -198,13 +233,14 @@ static CGFloat   const kDSHDefaultLevel = 1000000.0;  // 盖过灵动岛插件
     a[@"bundle"] = [[NSBundle mainBundle] bundleIdentifier] ?: @"";
     a[@"last_apply_at"] = @(self.lastApplyAt);
     a[@"last_state"] = self.lastState[@"state"] ?: @"";
+    a[@"shape"] = @"pill";
+    a[@"pill"] = @{ @"y": @(self.pillY), @"w": @(self.pillW), @"h": @(self.pillH),
+                    @"expand_w": @(self.pillExpandW), @"expand_h": @(self.pillExpandH) };
     a[@"ts"] = @([NSDate date].timeIntervalSince1970 * 1000.0);
     NSData *d = [NSJSONSerialization dataWithJSONObject:a options:0 error:nil];
     if (d) [d writeToFile:kDSHHUDAckPath atomically:YES];
 }
 
-/* 不再依赖 activeScene：遍历所有 connectedScenes 各建一个窗口；
- * 一个都没有时用 mainScreen.bounds 建无 scene 窗口（iOS 仍会显示）。 */
 - (NSArray<UIWindowScene *> *)allScenes {
     NSMutableArray *out = [NSMutableArray array];
     if (@available(iOS 13.0, *)) {
@@ -216,6 +252,7 @@ static CGFloat   const kDSHDefaultLevel = 1000000.0;  // 盖过灵动岛插件
 }
 
 - (CGFloat)topInsetForWidth:(CGFloat)screenW {
+    // 灵动岛药丸落在状态栏内（刘海中央），不是刘海下方。
     CGFloat inset = 0;
     if (@available(iOS 11.0, *)) {
         UIWindow *w = self.windows.firstObject;
@@ -223,8 +260,9 @@ static CGFloat   const kDSHDefaultLevel = 1000000.0;  // 盖过灵动岛插件
     }
     if (inset <= 0) inset = [UIApplication sharedApplication].statusBarFrame.size.height;
     if (inset <= 0) inset = 44;
-    // 灵动岛插件常把假岛画在状态栏里，往下多让一点，避免被其遮住。
-    return inset + 8;
+    // 药丸中心大致落在状态栏中线：y = (inset - 高度)/2，最小 6。
+    CGFloat y = (inset - self.pillH) / 2.0;
+    return MAX(6, y);
 }
 
 - (UIWindow *)makeWindowForScene:(UIWindowScene *)scene {
@@ -244,9 +282,8 @@ static CGFloat   const kDSHDefaultLevel = 1000000.0;  // 盖过灵动岛插件
     w.rootViewController.view.backgroundColor = [UIColor clearColor];
     w.rootViewController.view.userInteractionEnabled = NO;
 
-    DSHHUDView *hud = [[DSHHUDView alloc] initWithFrame:CGRectMake(0, 0, 230, 40)];
-    // 关键修复：初始化即常驻可见（低亮度待命），不再等事件才 alpha→1。
-    hud.alpha = 0.62;
+    DSHHUDView *hud = [[DSHHUDView alloc] initWithFrame:CGRectMake(0, 0, self.pillW, self.pillH)];
+    hud.alpha = 0.72;   // 待命低亮度，启动即肉眼可见
     [w addSubview:hud];
     [self.huds addObject:hud];
     [self.windows addObject:w];
@@ -258,12 +295,15 @@ static CGFloat   const kDSHDefaultLevel = 1000000.0;  // 盖过灵动岛插件
     self.windows = [NSMutableArray array];
     self.huds = [NSMutableArray array];
     self.level = kDSHDefaultLevel;
+    self.pillY = 0;      // 0 = 用 topInset 自动计算
+    self.pillW = 168;
+    self.pillH = 36;
+    self.pillExpandW = 300;
+    self.pillExpandH = 72;
     self.idleMode = YES;
 
     NSArray *scenes = [self allScenes];
     if (scenes.count == 0) {
-        // SpringBoard 尚未建立任何 scene：先建一个无 scene 的兜底窗口，
-        // 1s 后再试一次，把后续 scene 也补上（不阻塞主线程）。
         [self makeWindowForScene:nil];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             [self attachLateScenes];
@@ -272,7 +312,6 @@ static CGFloat   const kDSHDefaultLevel = 1000000.0;  // 盖过灵动岛插件
         for (UIWindowScene *s in scenes) [self makeWindowForScene:s];
     }
 
-    // 启动即显示待命态，让「HUD 是否加载」肉眼可判。
     for (DSHHUDView *h in self.huds) [h applyState:@"idle" idle:YES];
     [self layoutHUD];
     [self writeAck:@"started"];
@@ -284,7 +323,7 @@ static CGFloat   const kDSHDefaultLevel = 1000000.0;  // 盖过灵动岛插件
     self.tickTimer = [NSTimer scheduledTimerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *t) {
         [weakSelf tick];
     }];
-    NSLog(@"[dsh-hud] started windows=%lu level=%.0f", (unsigned long)self.windows.count, self.level);
+    NSLog(@"[dsh-hud] started windows=%lu level=%.0f pill", (unsigned long)self.windows.count, self.level);
 }
 
 - (void)attachLateScenes {
@@ -295,11 +334,10 @@ static CGFloat   const kDSHDefaultLevel = 1000000.0;  // 盖过灵动岛插件
         });
         return;
     }
-    // 已有无 scene 兜底窗口时，再为每个真实 scene 补一个（避免前台切换后不显示）。
     for (UIWindowScene *s in scenes) [self makeWindowForScene:s];
     for (DSHHUDView *h in self.huds) {
         [h applyState:self.lastState[@"state"] ?: @"idle" idle:self.idleMode];
-        h.alpha = self.idleMode ? 0.62 : 1.0;
+        h.alpha = self.idleMode ? 0.72 : 1.0;
     }
     [self layoutHUD];
     [self writeAck:@"scenes-attached"];
@@ -322,12 +360,14 @@ static CGFloat   const kDSHDefaultLevel = 1000000.0;  // 盖过灵动岛插件
 - (void)apply:(NSDictionary *)json {
     NSString *state = [json[@"state"] isKindOfClass:[NSString class]] ? json[@"state"] : @"running";
     NSString *detail = [json[@"detail"] isKindOfClass:[NSString class]] ? json[@"detail"] : @"";
-    NSString *title = [json[@"title"] isKindOfClass:[NSString class]] ? json[@"title"] : @"DSH 操控中";
+    NSString *verb = [json[@"verb"] isKindOfClass:[NSString class]] ? json[@"verb"] : @"";
+    NSString *handoff = [json[@"handoff"] isKindOfClass:[NSString class]] ? json[@"handoff"] : @"";
+    BOOL paused = [json[@"paused"] isKindOfClass:[NSNumber class]] ? [json[@"paused"] boolValue] : NO;
     NSInteger step = [json[@"step"] respondsToSelector:@selector(integerValue)] ? [json[@"step"] integerValue] : 0;
     NSInteger total = [json[@"total"] respondsToSelector:@selector(integerValue)] ? [json[@"total"] integerValue] : 0;
     BOOL idle = [state isEqualToString:@"idle"] || [state isEqualToString:@"ready"];
 
-    // 允许 bridge 动态覆盖 windowLevel（应对更强的灵动岛插件）。
+    // windowLevel 与药丸几何可由 bridge 动态覆盖。
     id lv = json[@"level"];
     if ([lv respondsToSelector:@selector(doubleValue)] && [lv doubleValue] > 0) {
         CGFloat newLevel = (CGFloat)[lv doubleValue];
@@ -336,20 +376,28 @@ static CGFloat   const kDSHDefaultLevel = 1000000.0;  // 盖过灵动岛插件
             for (UIWindow *w in self.windows) w.windowLevel = newLevel;
         }
     }
+    id py = json[@"pill_y"];
+    if ([py respondsToSelector:@selector(doubleValue)] && [py doubleValue] > 0) self.pillY = (CGFloat)[py doubleValue];
+    id pw = json[@"pill_w"];
+    if ([pw respondsToSelector:@selector(doubleValue)] && [pw doubleValue] >= 120) self.pillW = (CGFloat)[pw doubleValue];
+    id ph = json[@"pill_h"];
+    if ([ph respondsToSelector:@selector(doubleValue)] && [ph doubleValue] >= 28) self.pillH = (CGFloat)[ph doubleValue];
 
     self.lastState = json;
     self.idleMode = idle;
     self.shownAt = [NSDate date].timeIntervalSince1970;
     self.lastApplyAt = self.shownAt;
 
+    BOOL expand = paused || handoff.length > 0;
     for (DSHHUDView *hud in self.huds) {
-        hud.titleLabel.text = title;
-        hud.detailLabel.text = detail.length ? detail : @"…";
+        hud.verbLabel.text = idle ? @"DSH 待命" : (verb.length ? verb : @"执行中");
+        hud.detailLabel.text = handoff.length ? [@"需要你：" stringByAppendingString:handoff] : detail;
+        [hud setExpanded:expand];
         [hud applyState:state idle:idle];
         if (total > 0) [hud setProgress:(CGFloat)step / (CGFloat)total];
         else if (!idle && ![state isEqualToString:@"running"]) [hud setProgress:1.0];
         else [hud setProgress:idle ? 0.0 : 0.15];
-        hud.alpha = idle ? 0.62 : 1.0;   // 待命低亮度，执行时全亮
+        hud.alpha = idle ? 0.72 : 1.0;
     }
     [self layoutHUD];
     [self updateMeta];
@@ -361,35 +409,31 @@ static CGFloat   const kDSHDefaultLevel = 1000000.0;  // 盖过灵动岛插件
         DSHHUDView *hud = self.huds[i];
         UIWindow *w = i < self.windows.count ? self.windows[i] : nil;
         CGFloat screenW = w ? w.bounds.size.width : [UIScreen mainScreen].bounds.size.width;
-        CGFloat top = [self topInsetForWidth:screenW];
-        NSString *detail = hud.detailLabel.text ?: @"";
-        UIFont *f = hud.detailLabel.font;
-        CGFloat textW = [detail sizeWithAttributes:@{NSFontAttributeName: f}].width;
-        CGFloat titleW = [hud.titleLabel.text sizeWithAttributes:@{NSFontAttributeName: hud.titleLabel.font}].width;
-        CGFloat width = MAX(196, MIN(310, MAX(textW, titleW) + 32 + 74 + 14));
+        CGFloat top = self.pillY > 0 ? self.pillY : [self topInsetForWidth:screenW];
+        CGFloat width = hud.expanded ? self.pillExpandW : self.pillW;
+        CGFloat height = hud.expanded ? self.pillExpandH : self.pillH;
+        width = MIN(width, screenW - 24);
         CGFloat x = (screenW - width) * 0.5;
-        hud.frame = CGRectMake(x, top, width, 40);
+        hud.frame = CGRectMake(x, top, width, height);
         [hud setNeedsLayout];
     }
 }
 
 - (void)tick {
-    if (!self.lastState) {
-        // 还没有任何事件：保持待命胶囊常驻，绝不淡出（旧版在这里什么都不画）。
-        [self updateMeta];
-        return;
-    }
+    if (!self.lastState) { [self updateMeta]; return; }
     NSTimeInterval now = [NSDate date].timeIntervalSince1970;
     NSInteger ttl = [self.lastState[@"ttl_ms"] respondsToSelector:@selector(integerValue)]
         ? [self.lastState[@"ttl_ms"] integerValue] : 3000;
-    if (self.idleMode) { [self updateMeta]; return; }   // 待命/就绪常驻
+    if (self.idleMode) { [self updateMeta]; return; }
     BOOL running = [self.lastState[@"state"] isEqualToString:@"running"];
-    if (!running && (now - self.shownAt) * 1000 > ttl) {
-        // 完成/失败：淡出回到「待命」而不是彻底消失，保证始终可判 HUD 存在。
+    BOOL paused = [self.lastState[@"paused"] isKindOfClass:[NSNumber class]] ? [self.lastState[@"paused"] boolValue] : NO;
+    if (running || paused) { [self updateMeta]; return; }  // 执行/暂停中常驻
+    if ((now - self.shownAt) * 1000 > ttl) {
         for (DSHHUDView *h in self.huds) {
-            [UIView animateWithDuration:0.25 animations:^{ h.alpha = 0.62; }];
-            h.titleLabel.text = @"DSH 就绪";
-            h.detailLabel.text = @"等待任务 · 桥已连接";
+            [UIView animateWithDuration:0.25 animations:^{ h.alpha = 0.72; }];
+            h.verbLabel.text = @"DSH 待命";
+            h.detailLabel.text = @"";
+            [h setExpanded:NO];
             [h applyState:@"idle" idle:YES];
             [h setProgress:0.0];
         }
@@ -409,15 +453,9 @@ static CGFloat   const kDSHDefaultLevel = 1000000.0;  // 盖过灵动岛插件
     }
     NSInteger step = [self.lastState[@"step"] respondsToSelector:@selector(integerValue)] ? [self.lastState[@"step"] integerValue] : 0;
     NSInteger total = [self.lastState[@"total"] respondsToSelector:@selector(integerValue)] ? [self.lastState[@"total"] integerValue] : 0;
-    NSInteger elapsed = [self.lastState[@"elapsed_ms"] respondsToSelector:@selector(integerValue)] ? [self.lastState[@"elapsed_ms"] integerValue] : 0;
-    NSTimeInterval ts = [self.lastState[@"ts"] respondsToSelector:@selector(doubleValue)] ? [self.lastState[@"ts"] doubleValue] / 1000.0 : self.shownAt;
-    NSInteger live = elapsed + (NSInteger)MAX(0, (now - ts) * 1000);
     NSString *stepText = total > 0 ? [NSString stringWithFormat:@"%ld/%ld", (long)step, (long)total] : @"";
-    NSString *secs = [NSString stringWithFormat:@"%.1fs", live / 1000.0];
-    NSString *m = stepText.length ? [NSString stringWithFormat:@"%@ · %@", stepText, secs] : secs;
-    for (DSHHUDView *h in self.huds) h.metaLabel.text = m;
+    for (DSHHUDView *h in self.huds) h.metaLabel.text = stepText.length ? stepText : @"··";
 }
-
 @end
 
 #pragma mark - 入口
