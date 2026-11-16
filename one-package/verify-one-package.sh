@@ -170,7 +170,7 @@ R=$?; [ "$R" -eq 0 ] && PASS=$((PASS+7)) || FAIL=$((FAIL+1))
 node --check "$SP" >/dev/null 2>&1 && ok "session-persistence-jsonl 语法" || bad "session-persistence-jsonl 语法"
 node --check "$DP" >/dev/null 2>&1 && ok "directory-picker-auto 语法" || bad "directory-picker-auto 语法"
 
-sec "3c) 全屏入口唯一性（Web Clip 有 Title，半屏 native APP 隐藏）"
+sec "3c) 桌面入口（Web Clip 有 Title；+ios24.10 起 native APP 反转为主入口）"
 case "$VTAG" in ios24.*) NC=8 ;; *) NC=5 ;; esac
 python3 - "$WCPLIST" "$APP/Info.plist" "$D/dsh-extras-postinst.sh" "$VTAG" <<'PY'
 import plistlib, sys
@@ -178,13 +178,25 @@ wc = plistlib.load(open(sys.argv[1], 'rb'))
 app = plistlib.load(open(sys.argv[2], 'rb'))
 ex = open(sys.argv[3], encoding='utf-8').read()
 tag = sys.argv[4]
+native_primary = (tag == 'ios24.10')
 checks = [
  ('Web Clip 有 Title（桌面图标不再叫 Untitled）', bool(wc.get('Title'))),
  ('Web Clip Title 为 DeepSeek Harness', wc.get('Title') == 'DeepSeek Harness'),
- ('半屏 native APP 标记 SBAppTags=hidden', 'hidden' in (app.get('SBAppTags') or [])),
- ('extras 不再 register 半屏 APP 图标', 'register' not in ex or all(
-     l.strip().startswith('#') for l in ex.splitlines() if 'register' in l)),
 ]
+if native_primary:
+    # +ios24.10：原生 App 是主入口，不隐藏，可执行指向 DSHNativeApp，postinst 显式注册。
+    checks += [
+     ('native APP 不再隐藏（无 SBAppTags=hidden）', 'hidden' not in (app.get('SBAppTags') or [])),
+     ('CFBundleExecutable = DSHNativeApp', app.get('CFBundleExecutable') == 'DSHNativeApp'),
+     ('extras 显式 register 原生 APP 图标', '"$CTL" register' in ex or '"$U" -p "$APP"' in ex),
+     ('postinst 对 DSHNativeApp 签名', '"$APP/DSHNativeApp"' in ex),
+    ]
+else:
+    checks += [
+     ('半屏 native APP 标记 SBAppTags=hidden', 'hidden' in (app.get('SBAppTags') or [])),
+     ('extras 不再 register 半屏 APP 图标', 'register' not in ex or all(
+         l.strip().startswith('#') for l in ex.splitlines() if 'register' in l)),
+    ]
 if tag.startswith('ios24.'):
     # +ios24.1 起升级路径改为强制换进程；首版 +ios24 / +ios18 用 enable。
     checks += [
@@ -455,6 +467,37 @@ for needle in 'sendControl' "BRIDGE + '/control'" 'handoffBox' 'interjectInput' 
 done
 node --check "$SRV" >/dev/null 2>&1 && ok "+ios24.9 bridge 语法通过" || bad "+ios24.9 bridge 语法错误"
 node --check "$LP" >/dev/null 2>&1 && ok "+ios24.9 面板语法通过" || bad "+ios24.9 面板语法错误"
+
+if [ "$VTAG" = "ios24.10" ]; then
+  sec "7d) +ios24.10 原生 App 主入口 + 灵动岛药丸形态"
+  NA="$APP/DSHNativeApp"
+  [ -f "$NA" ] && ok "原生 App DSHNativeApp 已打包" || bad "缺原生 App DSHNativeApp"
+  if [ -f "$NA" ]; then
+    NMAGIC=$(od -An -tx1 -N4 "$NA" 2>/dev/null | tr -d ' \n')
+    [ "$NMAGIC" = "cffaedfe" ] && ok "DSHNativeApp 为 arm64 Mach-O" || bad "DSHNativeApp magic 异常 ($NMAGIC)"
+  fi
+  python3 - "$APP/Info.plist" <<'PY' && ok "native App 为主入口且未隐藏" || bad "native App 仍隐藏/可执行不符"
+import plistlib, sys
+d = plistlib.load(open(sys.argv[1], 'rb'))
+assert d.get('CFBundleExecutable') == 'DSHNativeApp'
+assert 'hidden' not in (d.get('SBAppTags') or [])
+PY
+  # 原生 UI 源码关键要素（主界面=进度、网页进设置）
+  NU="$HERE/../app-bundle/native-ui"
+  for needle in 'DSHRootVC' 'verbLabel' '/progress' '/control' \
+                'DSHSettingsVC' 'SFSafariViewController' '127.0.0.1:3080'; do
+    grep -qrF "$needle" "$NU" && ok "原生 UI 源码含 $needle" || bad "原生 UI 源码缺 $needle"
+  done
+  # 药丸形态源码
+  HSRC="$HERE/../phone-bridge/native/hud/HUDOverlay.m"
+  for needle in 'verbLabel' 'shape' 'pill_w' 'colorWithWhite:0.02 alpha:0.97' 'setExpanded'; do
+    grep -qF "$needle" "$HSRC" && ok "药丸形态含 $needle" || bad "药丸形态缺 $needle"
+  done
+  # 人话状态 server 侧
+  for needle in 'function humanVerb' 'noteRecent' 'verb: verb'; do
+    grep -qF "$needle" "$SRV" && ok "人话状态 server 含 $needle" || bad "人话状态 server 缺 $needle"
+  done
+fi
 
 sec "8) 两次构建字节级可复现"
 if [ -n "$ENGINE_ARG" ] && [ -n "$APPDIR_ARG" ]; then

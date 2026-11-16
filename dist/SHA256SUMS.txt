@@ -237,9 +237,8 @@ bce5bf18cf3417110b47fa651001331a8cf87ebe7d9a23c5db73b6baaee7497d  dev.airdevs.ds
 #   顺带修掉 make_node24_runtime.py 里 HERE 未定义的既有 bug（+ios24.6
 #   引入，此前 24.6/24.7 走 deb overlay 没触发完整构建）。
 2357ce12e0eb6b7dc766576cc46e9b29838533b668644e01e26508692153b896  dev.airdevs.dsh_0.2.2-rc.3+ios24.8_iphoneos-arm64.deb
-# 归档 HUD 二进制（新编版，含 hud.ack.json / last_apply_at / rootless install_name）；
-# 路径相对 dist/。deb 内的是同一份，可用 dpkg-deb -x 后比对。
-fb2c27549482c42ebbe7b7ab31bda6217350a5563d83bae78533e7808aa87b24  ../phone-bridge/native/hud/dsh-ios-hud.dylib
+# 归档 HUD 二进制在 +ios24.10 又按药丸形态重编（旧值 fb2c2754… 已失效），
+# 当前 SHA 见下方 +ios24.10 段；deb 内是同一份，dpkg-deb -x 后可比对。
 
 # +ios24.9（2026-11-15）：全面对标 DSH Go 的操控效率模型，从 rc.3 bundle
 #   完整重建。server.cjs 改为恒定 FIXED_TOOLS（28 个，不随 8090 在线状态
@@ -255,6 +254,22 @@ fb2c27549482c42ebbe7b7ab31bda6217350a5563d83bae78533e7808aa87b24  ../phone-bridg
 #   81 项全过（含离线控制链 EFFICIENCY_ALL_OK 与假上游 DIGEST_ALL_OK
 #   两组 +ios24.9 端到端）。
 5ffa3ab435712b8bf963a6886c154a9f9f50d50d4a6065f3d92808afd48484f2  dev.airdevs.dsh_0.2.2-rc.3+ios24.9_iphoneos-arm64.deb
+
+# +ios24.10（2026-11-16）：原生 App 主入口 + 灵动岛药丸形态。
+#   桌面入口从全屏 Web Clip 书签改为原生 UIKit App（app-bundle/native-ui/）
+#   —— 主界面直接读 8091/progress 显示 verb 人话状态 / 第 n/N 步 / 最近操作，
+#   暂停继续 / 停止 / 插话 / 交还确认卡走 POST /control；网页工作台移到设置页
+#   SFSafariViewController。Info.plist 去掉 SBAppTags=hidden，CFBundleExecutable
+#   改 DSHNativeApp；全屏 Web Clip 保留为兜底入口。
+#   HUDOverlay.m 从刘海下方宽胶囊改为灵动岛纯黑药丸（verbLabel / shape=pill /
+#   pill_y|pill_w|pill_h 可覆盖 / paused|handoff 展开卡），CI macos-15 重编。
+#   server.cjs 新增 humanVerb / noteRecent，verb / recent 写进 hud.json 与 SSE。
+# 核验：verify-one-package.sh 186 项全过（含 7d 原生 App/药丸章、静态 URL
+#   鉴权黑盒、数据零改动实测、两次构建字节级可复现）；
+#   verify-phone-bridge.sh 84 项全过（EFFICIENCY_ALL_OK / DIGEST_ALL_OK）。
+eb6be7ed2e06ec9d5fa71dc2ca34f85b630e69171c96a3aeaaf94c3c39e6c8d5  dev.airdevs.dsh_0.2.2-rc.3+ios24.10_iphoneos-arm64.deb
+5d28e855dd80b19edc4f1a1244ee2201ebbe05d9eeaf4ed1b6793a90ff1463b5  ../phone-bridge/native/hud/dsh-ios-hud.dylib
+1537d638199b2055a468d6dc15d4fdb1fb212a255a378204c430918d345e0e13  ../app-bundle/prebuilt/DSHNativeApp
 
 # --- 可选生态插件（手动安装，不预装）---
 f9f74e0f485148acfe544b88e35c17da196b6ff4c6da4f7a6576a7c566cd068a  dsh-ios-phone-control-0.1.0.tgz

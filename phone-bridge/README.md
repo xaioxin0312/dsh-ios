@@ -8,7 +8,43 @@ deb（`dev.airdevs.dsh`）一起安装**：原生层、bridge、launchd 自启�
 修好真机上进度完全不可见，并继续压缩 see-act 往返。**+ios24.9**
 全面对标 DSH Go 的操控效率模型：固定工具集、按行增量读屏、串行队列与
 停止围栏、intent / collect / skill / handoff 省链路工具，进度面板增加
-暂停 / 停止 / 插话 / 确认卡。
+暂停 / 停止 / 插话 / 确认卡。**+ios24.10** 把桌面入口换成原生实时进度 App
+（网页移入设置），并把 SpringBoard HUD 从宽胶囊改成落在岛位置的纯黑药丸，
+配 humanVerb 人话状态与展开卡。
+
+## +ios24.10：原生实时进度 App + 灵动岛药丸
+
+**为什么要自绘药丸，而不是只用系统 Live Activity**：iOS 上内容进灵动岛只有
+ActivityKit Live Activity 一条正路，但它后台更新必须走 APNs push，而我们是
+没有推送证书的本地 bridge（8091）——App 一退后台岛就冻结。本 dylib 注入在
+SpringBoard 进程，150ms 直接读 `hud.json` 刷新，不依赖 App 前后台 / 推送 /
+签名 entitlement，是「操控手机时始终能在岛上看到实时进度」唯一可控的通道。
+用户已开启的灵动岛插件与之并存，药丸几何可用 `hud.json` 的 `pill_y` /
+`pill_w` / `pill_h` 覆盖微调。
+
+### 人话状态（server.cjs `humanVerb` / `noteRecent`）
+内部 `tool`/`action`/`detail` 是给模型看的紧凑技术串，直接塞进岛又长又难读。
+`emitEvent()` 现在折叠成 `verb`（看屏幕 / 点按 / 输入中 / 等待你操作 / 已暂停
+/ 已完成…）+ `recent`（最近 3 条，连续重复自动合并），同时写进 `hud.json`
+与 SSE 快照。HUD 药丸与原生 App 主界面 / Web 面板共用同一份 `verb`。
+
+### 药丸形态（HUDOverlay.m）
+- 紧凑态：纯黑胶囊（约 168×36，圆角=高/2），落在顶部中央岛位置，状态点 +
+  `verb` + 第 n/N 步，底部一条细进度线；
+- 展开态：`state=paused` 或 `handoff` 非空时展开为约 300×72 卡片，多显示一行
+  detail / 交还原因，配合 App / 面板的确认卡；
+- 待命态：灰色小胶囊「DSH 待命」常驻不淡出；`hitTest` 恒 nil 不拦触摸。
+- 自检：`dsh-phone-bridge-ctl hud` 读 `hud.ack.json`，含 `shape=pill` 与
+  `pill` 几何、`level`、加载阶段。装后需 **respring 一次**让注入生效。
+
+### 原生 App 主入口（app-bundle/native-ui/）
+`DSHNativeApp`（CI `build-native-app.yml` / macos-15 编译）是新的
+`CFBundleExecutable`：主界面 `DSHRootVC` 直读 `8091/progress` 显示实时进度，
+控制走 `POST /control`；设置页 `DSHSettingsVC` 用 SFSafariViewController 打开
+网页工作台（不再让网页占主界面）。全屏 Web Clip 保留为兜底入口。
+
+核验：`sh phone-bridge/verify-phone-bridge.sh`（84 项，含 EFFICIENCY_ALL_OK /
+DIGEST_ALL_OK）、`verify-one-package.sh` 7d 章（原生 App / 药丸形态 / 人话状态）。
 
 ## +ios24.9：全面对标 DSH Go 的操控效率模型
 

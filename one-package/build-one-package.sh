@@ -308,26 +308,33 @@ else
     echo "==> [3d-1] Node 22 档：保留稳定底座原运行时（不打 Node24 补丁）"
 fi
 
-# 3d-2 单包只保留「一个全屏入口」。native DSH.app 用的是
-# SFSafariViewController，永远带 Safari 顶栏/底栏/关闭按钮（真机截图
-# "127.0.0.1 / 关闭 / 大小"），与用户要求的「和官方 App 一样全屏」冲突。
-# 真全屏的是 FullScreen=true 的 Web Clip（3f）。这里给 native APP 注入
-# SBAppTags=hidden 让 SpringBoard 不再显示它，并改个不混淆的名字；APP 文件
-# 本身保留（终端 dsh-app-ctl ensure / 兜底仍可用），但不再是点开的入口。
-# 只改 stage 内的副本，app-bundle 独立包的源 Info.plist 一个字节不动。
+# 3d-2 +ios24.10：native DSH.app 从「隐藏的 Safari 兜底」反转为主入口。
+# 主界面现在是原生 UIKit 写的实时进度（native-ui/DSHRootVC），不是书签、
+# 不是 Web Clip；网页工作台移到 App 的「设置」页里（SFSafariViewController）。
+# 因此：去掉 SBAppTags=hidden、CFBundleExecutable 指向新的 DSHNativeApp，
+# 桌面显示的是真正的原生 App。全屏 Web Clip（3f）保留为兜底入口，二者并存。
+# 只改 stage 内副本，app-bundle 源 Info.plist 一个字节不动。
 python3 - "$STAGE/var/jb/Applications/DSH.app/Info.plist" <<'PY'
 import plistlib, sys
 p = sys.argv[1]
 d = plistlib.load(open(p, 'rb'))
-d['SBAppTags'] = ['hidden']
-d['CFBundleDisplayName'] = 'DSH (Safari fallback)'
+d.pop('SBAppTags', None)                 # 取消隐藏：桌面显示原生 App
+d['CFBundleDisplayName'] = 'DeepSeek Harness'
+d['CFBundleExecutable'] = 'DSHNativeApp' # 主界面 = 原生实时进度 App
 with open(p, 'wb') as f:
     plistlib.dump(d, f, sort_keys=False)
-print('    native APP 已标记隐藏，桌面主入口 = 全屏 Web Clip')
+print('    native APP = 主入口（原生实时进度，CFBundleExecutable=DSHNativeApp）')
 PY
 
-# 3e prebuilt 可执行 + setuid helper + 图标
+# 3e 原生 App 可执行 + setuid helper + 图标
+# +ios24.10：主可执行换成 CI 编译的 DSHNativeApp（native-ui/ 源码）；
+# 旧 DSHLauncher 一并放进包内，供 dsh-app-ctl 终端路径兜底用。
 APPB="$ROOT/app-bundle"
+[ -f "$APPB/prebuilt/DSHNativeApp" ] || {
+    echo "缺 $APPB/prebuilt/DSHNativeApp：先跑 build-native-app workflow 并回填产物" >&2
+    exit 1
+}
+cp "$APPB/prebuilt/DSHNativeApp"    "$STAGE/var/jb/Applications/DSH.app/DSHNativeApp"
 cp "$APPB/prebuilt/DSHLauncher"     "$STAGE/var/jb/Applications/DSH.app/DSHLauncher"
 cp "$APPB/prebuilt/dsh-app-helper"  "$STAGE/var/jb/usr/bin/dsh-app-helper"
 python3 "$APPB/make_app_icon.py" "$STAGE/var/jb/Applications/DSH.app" | sed 's/^/    /'
@@ -397,14 +404,28 @@ fi
 # +ios24.x 的 changelog 只写在 stage 副本里：共享 control 原文件一个字节不动。
 # +ios18 是已冻结的对照档（927b5308…），当前源码面向 +ios24.6，不再承诺
 # 从当前 HEAD 重新构建 +ios18 能 1:1 复现当时的历史产物。
-case "$TAG" in ios24.1|ios24.2|ios24.3|ios24.4|ios24.5|ios24.6|ios24.7|ios24.8|ios24.9) ;; *) skip_changelog=1 ;; esac
+case "$TAG" in ios24.1|ios24.2|ios24.3|ios24.4|ios24.5|ios24.6|ios24.7|ios24.8|ios24.9|ios24.10) ;; *) skip_changelog=1 ;; esac
 if [ "${skip_changelog:-0}" != "1" ]; then
     python3 - "$STAGE/DEBIAN/control" "$TAG" <<'PY'
 import sys
 p, tag = sys.argv[1:3]
 s = open(p, encoding='utf-8').read()
 extra = ""
-if tag == "ios24.9":
+if tag == "ios24.10":
+    extra = """ * 桌面入口从网页书签改为真正的原生 App：打开即是原生 UIKit 写的
+   手机操控实时进度主页（状态灯 / 人话动作 / 第 n/N 步 / 最近 3 条操作 /
+   暂停继续 / 停止 / 插话 / 交还确认卡），数据直读本机 bridge，无需先开
+   浏览器；DSH 网页工作台移到 App 的「设置」页里，工作区 / 会话 / 插件保留；
+ * 灵动岛进度药丸形态重做：SpringBoard 注入的 HUD 从「刘海下方宽胶囊」
+   改为精确落在岛位置的纯黑药丸，主文案用 verb 人话状态（看屏幕 / 点按 /
+   输入中 / 等待你操作…），paused / handoff 时展开为卡片显示交还原因，
+   hud.json 可覆盖 pill_y / pill_w / pill_h 几何；不依赖 APNs 推送，App
+   退到后台仍 150ms 实时刷新；
+ * 保留 +ios24.9 的恒定工具集 / 增量读屏 / 串行走廊 / 10 个效率工具、
+   +ios24.8 实时进度双通道与 HUD 可见性修复、+ios24.2 会话兼容等全部
+   历史修复，升级不丢插件 / 工作区 / 对话 / 配置。
+"""
+elif tag == "ios24.9":
     extra = """ * 深度对标 DSH Go 的手机 Agent 效率模型：工具集恒定，绝不随 8090 原生层
    在线状态变化 —— 工具名 / 描述 / schema 每轮都进模型上下文，任何变化
    都会让 DeepSeek 的 KV cache 从第一个改动的 token 起整段作废；原生层
@@ -568,6 +589,7 @@ for f in \
   "$STAGE/var/jb/usr/lib/dsh/webclip/Info.plist" \
   "$STAGE/var/jb/usr/lib/dsh/webclip/icon.png" \
   "$STAGE/var/jb/usr/lib/dsh/webclip/token" \
+  "$STAGE/var/jb/Applications/DSH.app/DSHNativeApp" \
   "$STAGE/var/jb/Applications/DSH.app/DSHLauncher" \
   "$STAGE/var/jb/Applications/DSH.app/Info.plist" \
   "$STAGE/var/jb/Applications/DSH.app/entitlements.plist" \
@@ -734,6 +756,33 @@ node --check "$BR/server.cjs" || exit 1
 node --check "$FR/assets/dsh-ios-live-progress.js" || exit 1
 echo "    +ios24.9 断言通过（固定工具集 / 增量读屏 / 串行围栏 / 10 个新工具 / 面板交互）"
 
+# +ios24.10：原生 App 主入口 + 灵动岛药丸形态
+echo "==> 构建期 +ios24.10 断言（原生 App 主入口 / 药丸形态 / 人话状态）"
+NA="$STAGE/var/jb/Applications/DSH.app/DSHNativeApp"
+[ -f "$NA" ] || { echo "构建中止：缺原生 App DSHNativeApp" >&2; exit 1; }
+NAMAGIC=$(od -An -tx1 -N4 "$NA" 2>/dev/null | tr -d ' \n')
+[ "$NAMAGIC" = 'cffaedfe' ] || { echo "构建中止：DSHNativeApp 非 arm64 Mach-O ($NAMAGIC)" >&2; exit 1; }
+python3 - "$STAGE/var/jb/Applications/DSH.app/Info.plist" <<'PY'
+import plistlib, sys
+d = plistlib.load(open(sys.argv[1], 'rb'))
+assert d.get('CFBundleExecutable') == 'DSHNativeApp', d.get('CFBundleExecutable')
+assert 'SBAppTags' not in d, 'native App 仍被隐藏'
+print('    Info.plist 主入口 = DSHNativeApp 且未隐藏')
+PY
+# 药丸形态源码断言
+for needle in 'verbLabel' 'shape' 'pill_w' 'colorWithWhite:0.02 alpha:0.97'; do
+    grep -qF "$needle" "$ROOT/phone-bridge/native/hud/HUDOverlay.m" || {
+        echo "构建中止：HUD 药丸形态缺 $needle" >&2; exit 1; }
+done
+# server.cjs 人话状态
+for needle in 'function humanVerb' 'noteRecent' 'verb: verb' 'recent: recentOps.slice()'; do
+    grep -qF "$needle" "$BR/server.cjs" || { echo "构建中止：server.cjs 缺 $needle" >&2; exit 1; }
+done
+# postinst 注册原生 App + 双签名
+grep -qF '"$APP/DSHNativeApp"' "$STAGE/var/jb/usr/lib/dsh/dsh-extras-postinst.sh" || {
+    echo "构建中止：postinst 未处理 DSHNativeApp" >&2; exit 1; }
+echo "    +ios24.10 断言通过（原生 App 主入口 / 药丸形态 / 人话状态）"
+
 for f in "$STAGE/var/jb/usr/bin/dsh" "$STAGE/var/jb/usr/bin/dsh-daemon" \
          "$STAGE/var/jb/usr/bin/dsh-app-ctl" "$STAGE/var/jb/usr/bin/dsh-app-ui" \
          "$STAGE/var/jb/usr/lib/dsh/dsh-extras-postinst.sh" \
@@ -763,7 +812,8 @@ PY
 # 结果 helper 实际是 755 —— App 以 mobile 身份执行它时无法 bootstrap
 # launchd daemon，点图标根本起不来服务。
 chown -R 0:0 "$STAGE" 2>/dev/null || true
-chmod 755 "$STAGE/var/jb/Applications/DSH.app/DSHLauncher" \
+chmod 755 "$STAGE/var/jb/Applications/DSH.app/DSHNativeApp" \
+          "$STAGE/var/jb/Applications/DSH.app/DSHLauncher" \
           "$STAGE/var/jb/usr/bin/dsh" "$STAGE/var/jb/usr/bin/dsh-doctor" \
           "$STAGE/var/jb/usr/bin/dsh-daemon" "$STAGE/var/jb/usr/bin/dsh-app-ctl" \
           "$STAGE/var/jb/usr/bin/dsh-app-ui" "$STAGE/var/jb/usr/bin/pnpm" \

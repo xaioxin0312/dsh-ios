@@ -41,7 +41,9 @@ WCDIR="${DSH_WEBCLIP_DIR:-/var/mobile/Library/WebClips/133239ba-d3d0-422d-ba40-7
 WCLIB=$(dirname "$WCDIR")
 
 # 包内系统文件权限（不涉及用户数据目录）。
-chmod 755 "$APP/DSHLauncher" "$JB/usr/bin/dsh-app-ctl" "$JB/usr/bin/dsh-daemon" \
+# +ios24.10：DSHNativeApp 是主入口（原生实时进度 App），DSHLauncher 保留兜底。
+chmod 755 "$APP/DSHNativeApp" "$APP/DSHLauncher" \
+  "$JB/usr/bin/dsh-app-ctl" "$JB/usr/bin/dsh-daemon" \
   "$JB/usr/bin/dsh-app-ui" "$JB/usr/bin/dsh-phone-bridge-daemon" \
   "$JB/usr/bin/dsh-phone-bridge-ctl" "$JB/usr/bin/mcp-logreader" \
   "$JB/usr/bin/dsh-autostart" "$JB/usr/bin/dsh-autostart-agent" \
@@ -59,6 +61,7 @@ done
 [ -f "$HELPER" ] && chmod 4755 "$HELPER" 2>/dev/null || true
 LDID=""; for c in "$JB/usr/bin/ldid" "$JB/bin/ldid" /usr/bin/ldid; do [ -x "$c" ] && { LDID="$c"; break; }; done
 if [ -n "$LDID" ]; then
+  [ -f "$ENT" ] && "$LDID" -S"$ENT" "$APP/DSHNativeApp" 2>/dev/null || true
   [ -f "$ENT" ] && "$LDID" -S"$ENT" "$APP/DSHLauncher" 2>/dev/null || true
   [ -f "$DYL" ] && "$LDID" -S "$DYL" 2>/dev/null || true
   [ -f "$DYLDIR/dsh-ios-hud.dylib" ] && "$LDID" -S "$DYLDIR/dsh-ios-hud.dylib" 2>/dev/null || true
@@ -165,11 +168,16 @@ else
     [ -x "$CTL" ] && "$CTL" restart >/dev/null 2>&1 || true
 fi
 
-# 只刷新 SpringBoard 让它读取新建的 Web Clip 图标。绝不调用
-# `dsh-app-ctl register` —— 那会 uicache -p 把半屏 SFSafariViewController
-# 的 native DSH.app 图标显式刷到桌面。单包内该 APP 已带 SBAppTags=hidden。
+# +ios24.10：native DSH.app 反转为主入口（原生实时进度），显式注册它的图标，
+# 再让 SpringBoard 读取 Web Clip（兜底入口）。dsh-app-ctl register 会按 CFBundle
+# 找到 DSHNativeApp 并 uicache -p，这里直接调用它更稳；失败则退回手动 uicache -p。
+[ -x "$CTL" ] && "$CTL" register >/dev/null 2>&1 || true
 for U in "$JB/usr/bin/uicache" "$JB/bin/uicache" /usr/bin/uicache; do
-    if [ -x "$U" ]; then "$U" -a >/dev/null 2>&1 || true; break; fi
+    if [ -x "$U" ]; then
+        "$U" -p "$APP" >/dev/null 2>&1 || true
+        "$U" -a >/dev/null 2>&1 || true
+        break
+    fi
 done
 
 # --- 5) +ios24.8：给 HUD 状态目录正确的属主 -------------------------------
@@ -185,11 +193,11 @@ chown 501:501 "$HUDSTATE" 2>/dev/null || true
 chmod 755 "$HUDSTATE" 2>/dev/null || true
 rm -f "$HUDSTATE/hud.ack.json" 2>/dev/null || true
 
-echo "DeepSeek Harness 单包：DSH 0.2.2-rc.3 + 全屏 Web Clip 入口 已就绪。"
-echo "  桌面点「DeepSeek Harness」图标即全屏使用；工作区 / 会话 / 插件全部保留。"
-echo "  +ios24.8：实时进度主通道在 DSH 页面右下角常驻卡片（无需 respring，装完即可见）。"
-echo "  SpringBoard 灵动岛胶囊为辅助显示，需 respring 一次让 HUD 注入生效；"
-echo "  两者都看不到时终端跑 dsh-phone-bridge-ctl hud 做完整诊断。"
-echo "  +ios24.7：开机自启已加用户会话兜底；异常时终端跑 dsh-autostart status 诊断。"
-echo "  若桌面仍是旧图标或仍显示 401，请 respring 一次（SpringBoard 会缓存旧 Web Clip）。"
+echo "DeepSeek Harness 单包：DSH 0.2.2-rc.3 + 原生实时进度 App 已就绪。"
+echo "  +ios24.10：桌面主入口变成原生 App —— 打开即是手机操控实时进度（状态/步数/最近操作/暂停停止插话）；"
+echo "  网页工作台移到 App 的「设置 → 打开 DSH 网页工作台」里，工作区 / 会话 / 插件全部保留。"
+echo "  灵动岛进度：SpringBoard 药丸显示人话动作，需 respring 一次让 HUD 注入生效；"
+echo "  看不到时终端跑 dsh-phone-bridge-ctl hud 做完整诊断。"
+echo "  全屏 Web Clip 仍保留为兜底入口；开机自启异常时跑 dsh-autostart status 诊断。"
+echo "  若桌面仍是旧图标，请 respring 一次（SpringBoard 会缓存图标）。"
 exit 0

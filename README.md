@@ -8,12 +8,39 @@
 > 关于 Node 24.9：**（rc.1 时代的历史结论）** 当时公开可得的 iOS arm64 Node 可执行文件确实不存在（详见 [`docs/DSH-NODE-UPGRADE-EVALUATION.md`](docs/DSH-NODE-UPGRADE-EVALUATION.md)），但实证发现官方 `0.2.2-rc.1` 的四处 Node 22.12 兼容补丁锚点与 `0.2.1-rc.5` **逐字一致**，因此用同一套补丁 + 同一个已验证的 Node 22.12.0，做出了经 31 项核验（含真 boot、会话创建与恢复）的完整升级包。
 >
 > **⚠️ 2026-11-14 更正**：上面「不存在」的结论已被本仓库自己的 CI 推翻 —— GitHub Actions run `43532556241` 成功编译出 **Node v24.19.0 iOS arm64 独立 CLI**（artifact `14095226518` / Release `node24-exp`，SHA `8bebb2a2…`）。且 rc.3 的 `engines.node >= 24.9.0` **不是 advisory**（`bin.js` 用 `import.meta.main`）。故 rc.3 单包已改用该成品。首版 `+ios24` 在 A11 真机上暴露运行时不兼容，
-**当前推荐档位是 `+ios24.9` 正式版**（全面对标 DSH Go 的操控效率 + 进度面板可交互），
-详见下方「正式版 +ios24.9」章节与 `one-package/README.md`。
+**当前推荐档位是 `+ios24.10` 正式版**（原生 App 主界面 = 手机操控实时进度 + 灵动岛药丸，网页移入设置），
+详见下方「正式版 +ios24.10」章节与 `one-package/README.md`。
+
+---
+
+## 正式版 · `+ios24.10`（2026-11-16，原生实时进度 App + 灵动岛药丸）
+
+> 当前推荐安装的正式版。Release 附件：
+> `dev.airdevs.dsh_0.2.2-rc.3+ios24.10_iphoneos-arm64.deb`。
+> 适用 iPhone X (A11, arm64) / iOS 15–16.7.x / Dopamine rootless (`/var/jb`)。
+
+**这一版把桌面入口从「网页书签」换成了真正的原生 App**，打开即是手机操控的实时进度主页：
+
+| 主界面（原生 UIKit，非网页） | 说明 |
+| --- | --- |
+| 状态灯 + 人话动作 | 待命 / 看屏幕 / 点按 / 输入中 / 等待你操作 / 已暂停，直读 bridge `8091/progress` |
+| 第 n/N 步 + 进度条 | 实时步骤与耗时，1 秒轮询 |
+| 暂停·继续 / 停止 / 插话 | 走 `POST /control`，与 DSH Go 悬浮条同一套语义 |
+| 最近 3 条操作 | 折叠时间线，连续重复自动合并 |
+| 交还确认卡 | handoff 时展开「我操作好了」按钮 |
+| 设置页 | **网页工作台从这里进**（SFSafariViewController 打开 `127.0.0.1:3080?token=…`）+ 桥状态自检 |
+
+**灵动岛进度**由 SpringBoard 注入的药丸负责：从旧的「刘海下方宽胶囊」改为精确落在岛位置的**纯黑药丸**，主文案用同一份 `verb` 人话状态，paused/handoff 时展开成卡片显示交还原因；150ms 刷新、不依赖 APNs 推送，App 退后台仍实时。装后 **respring 一次**让 HUD 注入生效，终端 `dsh-phone-bridge-ctl hud` 可自检（ack 含药丸几何）。
+
+全屏 Web Clip 保留为兜底入口；工作区 / 会话 / 插件 / 配置升级不丢。保留 `+ios24.9` 恒定工具集 / 增量读屏 / 串行走廊 / 效率工具与 `+ios24.8` 实时进度双通道等全部历史修复。
+
+核验：`sh one-package/verify-one-package.sh <deb> bundles/… app-bundle/payload`（含 7d 章原生 App / 药丸形态断言）、`sh phone-bridge/verify-phone-bridge.sh`。
 
 ---
 
 ## 正式版 · `+ios24.9`（2026-11-15，全面对标 DSH Go 的操控效率）
+
+> 历史交付（已被 `+ios24.10` 取代）。Release 附件：
 
 > 当前推荐安装的正式版。Release 附件：
 > `dev.airdevs.dsh_0.2.2-rc.3+ios24.9_iphoneos-arm64.deb`。
