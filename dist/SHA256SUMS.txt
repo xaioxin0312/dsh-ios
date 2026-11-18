@@ -271,6 +271,23 @@ eb6be7ed2e06ec9d5fa71dc2ca34f85b630e69171c96a3aeaaf94c3c39e6c8d5  dev.airdevs.ds
 5d28e855dd80b19edc4f1a1244ee2201ebbe05d9eeaf4ed1b6793a90ff1463b5  ../phone-bridge/native/hud/dsh-ios-hud.dylib
 1537d638199b2055a468d6dc15d4fdb1fb212a255a378204c430918d345e0e13  ../app-bundle/prebuilt/DSHNativeApp
 
+# +ios24.11（2026-11-18）：全屏 WebView 主界面 + 动态端口 + 无书签。
+#   原生 App 主界面改为全屏 WKWebView 加载 DSH 官方 Web UI（观感同官方桌面端，
+#   无浏览器控件），端口/token 运行时从 daemon 状态文件 (var/log/dsh-app/web-port,
+#   web-token) 读取；WKWebView 因 rootless 伪签起不来时自动降级 SFSafari 绝不白屏。
+#   entitlements 补 com.apple.security.network.{client,server} + storage.AppBundles/
+#   AppDataContainers（WebContent 独立 XPC 进程所需）；build-native-app.sh 加
+#   -framework WebKit，CI macos-15 重编（含 DSHWebVC.m）。
+#   daemon 加 port-probe.cjs（node-safe 零 JIT）探测空闲端口：3080 被占自动递增，
+#   写状态文件给 App；postinst 探活读状态文件。彻底移除 Web Clip 书签安装，
+#   桌面只留随 deb 安装的原生 App；灵动岛 HUD / phone-bridge 完全不动。
+# 核验：verify-one-package.sh 201 项全过（含 7e 全屏 WebView/动态端口/端口冲突
+#   避让黑盒、7d 药丸、鉴权黑盒、数据零改动、两次构建字节级可复现）；
+#   verify-phone-bridge.sh 84 项全过。
+2f9756c97fdc7e6f1488bb27fa62d75e24f7516a2115d757cd739f610b80894f  dev.airdevs.dsh_0.2.2-rc.3+ios24.11_iphoneos-arm64.deb
+5d28e855dd80b19edc4f1a1244ee2201ebbe05d9eeaf4ed1b6793a90ff1463b5  ../phone-bridge/native/hud/dsh-ios-hud.dylib
+e43bfad4986084e30e7f984000ba83967d14e38c185c122bd29beaedc8325744  ../app-bundle/prebuilt/DSHNativeApp
+
 # --- 可选生态插件（手动安装，不预装）---
 f9f74e0f485148acfe544b88e35c17da196b6ff4c6da4f7a6576a7c566cd068a  dsh-ios-phone-control-0.1.0.tgz
 

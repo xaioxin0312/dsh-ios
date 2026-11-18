@@ -4,7 +4,7 @@
 「最新 DSH + 像官方 App 一样点图标即用」的主交付。稳定底座
 （`build.sh` 产出的 `0.2.1-rc.5+ios15` / `0.2.2-rc.1+ios16`）一个字节都没动。
 
-## 档位：请装 `+ios24.10`
+## 档位：请装 `+ios24.11`
 
 | 档位 | 内置 Node | DSH | 状态 |
 | --- | --- | --- | --- |
@@ -19,7 +19,8 @@
 | `+ios24.7` | v24.19.0 + 操控提速 + HUD + 自启兜底 | 0.2.2-rc.3 | **已被取代**：`phone_act` / `watch_screen` / `wait_for_change`、SpringBoard 实时进度胶囊（真机仍不可见） |
 | `+ios24.8` | v24.19.0 + 实时进度双通道 + 效率工具 | 0.2.2-rc.3 | **已被取代**：进度主通道搬进 DSH 页面右下角卡片（SSE / 轮询 / DOM 观察三级兜底）、HUD 重编常驻可见、8090 冲突去重、`find_element` / `wait_for_text` / `progress_status` / 整批预校验 |
 | `+ios24.9` | v24.19.0 + DSH Go 效率模型 | 0.2.2-rc.3 | **已被取代**：固定工具集（KV cache 不再失效）、按行增量读屏 `sN` / `ui_verdict`、`phone_intent` / `phone_collect` / `phone_skill_*` / `phone_handoff` / `phone_batch`、串行队列与 epoch 围栏、进度面板暂停/停止/插话/确认卡 |
-| `+ios24.10` | v24.19.0 + 原生实时进度 App + 灵动岛药丸 | 0.2.2-rc.3 | **推荐**：桌面入口从书签改为原生 UIKit App（主界面=实时进度，网页移入设置）、SpringBoard 药丸落在岛位置显示 verb 人话状态 + 展开卡、150ms 刷新不依赖 APNs；含 +ios24.9 全部效率工具 |
+| `+ios24.10` | v24.19.0 + 原生实时进度 App + 灵动岛药丸 | 0.2.2-rc.3 | **已被取代**：桌面入口从书签改为原生 UIKit App（主界面=实时进度，网页移入设置）、SpringBoard 药丸落在岛位置显示 verb 人话状态 + 展开卡、150ms 刷新不依赖 APNs |
+| `+ios24.11` | v24.19.0 + 全屏 WebView 主界面 + 动态端口 | 0.2.2-rc.3 | **推荐**：原生 App 主界面改为全屏加载官方 DSH Web UI（观感同官方桌面端，无浏览器控件），WKWebView 起不来自动降级 SFSafari 绝不白屏；动态端口避开 3080 冲突；彻底移除 Web Clip 书签，桌面只留随包安装的原生 App；灵动岛 / +ios24.9 全部效率工具保留 |
 
 **为什么 `+ios18` 是坏的**：rc.3 的 `package.json` 声明 `engines.node >= 24.9.0`，
 且 `lib/bin.js` 用了 `import.meta.main`（Node 24.2+ 才支持）。22.12.0 上
@@ -245,7 +246,7 @@ sh one-package/build-one-package.sh \
 node 二进制，可用 `NODE_IOS_BIN=/path/to/node` 指定；缺失时脚本会直接
 中止，绝不产出「装得上但起不来」的残包。
 
-当前正式档 `+ios24.10` 的实际构建命令（Node 24.19.0 arm64 成品来自 Actions
+当前正式档 `+ios24.11` 的实际构建命令（Node 24.19.0 arm64 成品来自 Actions
 `node24-ios-jit` / Release `node24-exp`）。**先决条件**：两个原生二进制必须由
 CI 编译后回填 —— `build-native-app.yml` → `app-bundle/prebuilt/DSHNativeApp`、
 `build-native-hud.yml` → `phone-bridge/native/hud/dsh-ios-hud.dylib`（本机无
@@ -253,16 +254,16 @@ iOS SDK，无法交叉编译 UIKit / dylib）：
 
 ```sh
 NODE_IOS_BIN=/path/to/node-v24.19.0-iphoneos-arm64-jit \
-DSH_IOS_TAG=ios24.10 \
+DSH_IOS_TAG=ios24.11 \
   sh one-package/build-one-package.sh \
       bundles/dsh-nodemodules-0.2.2-rc.3+ios1.tar.gz \
       app-bundle/payload \
-      dist/dev.airdevs.dsh_0.2.2-rc.3+ios24.10_iphoneos-arm64.deb
+      dist/dev.airdevs.dsh_0.2.2-rc.3+ios24.11_iphoneos-arm64.deb
 
 # 第 8 章「两次构建字节级可复现」会重跑一遍构建，需带上同一个 NODE_IOS_BIN
 NODE_IOS_BIN=/path/to/node-v24.19.0-iphoneos-arm64-jit \
-DSH_IOS_TAG=ios24.10 sh one-package/verify-one-package.sh \
-    dist/dev.airdevs.dsh_0.2.2-rc.3+ios24.10_iphoneos-arm64.deb \
+DSH_IOS_TAG=ios24.11 sh one-package/verify-one-package.sh \
+    dist/dev.airdevs.dsh_0.2.2-rc.3+ios24.11_iphoneos-arm64.deb \
     bundles/dsh-nodemodules-0.2.2-rc.3+ios1.tar.gz app-bundle/payload
 ```
 

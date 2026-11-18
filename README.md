@@ -8,8 +8,28 @@
 > 关于 Node 24.9：**（rc.1 时代的历史结论）** 当时公开可得的 iOS arm64 Node 可执行文件确实不存在（详见 [`docs/DSH-NODE-UPGRADE-EVALUATION.md`](docs/DSH-NODE-UPGRADE-EVALUATION.md)），但实证发现官方 `0.2.2-rc.1` 的四处 Node 22.12 兼容补丁锚点与 `0.2.1-rc.5` **逐字一致**，因此用同一套补丁 + 同一个已验证的 Node 22.12.0，做出了经 31 项核验（含真 boot、会话创建与恢复）的完整升级包。
 >
 > **⚠️ 2026-11-14 更正**：上面「不存在」的结论已被本仓库自己的 CI 推翻 —— GitHub Actions run `43532556241` 成功编译出 **Node v24.19.0 iOS arm64 独立 CLI**（artifact `14095226518` / Release `node24-exp`，SHA `8bebb2a2…`）。且 rc.3 的 `engines.node >= 24.9.0` **不是 advisory**（`bin.js` 用 `import.meta.main`）。故 rc.3 单包已改用该成品。首版 `+ios24` 在 A11 真机上暴露运行时不兼容，
-**当前推荐档位是 `+ios24.10` 正式版**（原生 App 主界面 = 手机操控实时进度 + 灵动岛药丸，网页移入设置），
-详见下方「正式版 +ios24.10」章节与 `one-package/README.md`。
+**当前推荐档位是 `+ios24.11` 正式版**（原生 App 主界面 = 全屏加载 DSH 官方 Web UI，对标官方桌面端观感 + 动态端口 + 无书签），
+详见下方「正式版 +ios24.11」章节与 `one-package/README.md`。
+
+---
+
+## 正式版 · `+ios24.11`（2026-11-18，全屏 WebView 主界面 + 动态端口 + 无书签）
+
+> 当前推荐安装的正式版。Release 附件：
+> `dev.airdevs.dsh_0.2.2-rc.3+ios24.11_iphoneos-arm64.deb`。
+> 适用 iPhone X (A11, arm64) / iOS 15–16.7.x / Dopamine rootless (`/var/jb`)。
+
+**这一版把原生 App 主界面改成全屏加载 DSH 官方 Web UI，观感和官方桌面端一致**——没有地址栏 / 标签栏 / 工具栏，打开就是普通 APP。底层引擎、Node、daemon、对话、工作区、插件、灵动岛全部不变，从 App 打开或终端敲 `dsh` 走的是同一份数据。
+
+| 改进 | 说明 |
+| --- | --- |
+| **全屏 WebView 主界面** | 原生 WKWebView 铺满屏幕加载官方 Web UI；端口/token 运行时从 daemon 状态文件读 |
+| **绝白屏双保险** | WKWebView 因 rootless 伪签起不来时，自动降级到系统 Safari 视图打开同一地址 |
+| **动态端口** | daemon 启动探测 3080，被占则自动递增（3081…），写状态文件给 App；解决真机端口冲突，空闲时行为与旧版完全相同 |
+| **无书签** | 桌面只留随 deb 安装的原生 App（装包即装 App，与官方一致），升级时旧 Web Clip 书签自动清除 |
+| **灵动岛不变** | SpringBoard 药丸继续读 `hud.json` 显示人话实时进度，150ms 刷新、不依赖 APNs |
+
+核验：`DSH_IOS_TAG=ios24.11 sh one-package/verify-one-package.sh <deb> bundles/… app-bundle/payload`（含 7e 章全屏 WebView / 动态端口 / 端口冲突避让黑盒断言，200+ 项）、`sh phone-bridge/verify-phone-bridge.sh`。
 
 ---
 
