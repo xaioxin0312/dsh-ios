@@ -178,7 +178,7 @@ wc = plistlib.load(open(sys.argv[1], 'rb'))
 app = plistlib.load(open(sys.argv[2], 'rb'))
 ex = open(sys.argv[3], encoding='utf-8').read()
 tag = sys.argv[4]
-native_primary = (tag == 'ios24.10')
+native_primary = (tag in ('ios24.10', 'ios24.11'))
 checks = [
  ('Web Clip 有 Title（桌面图标不再叫 Untitled）', bool(wc.get('Title'))),
  ('Web Clip Title 为 DeepSeek Harness', wc.get('Title') == 'DeepSeek Harness'),
@@ -360,7 +360,9 @@ grep -q 'statusCode===303' "$X/var/jb/usr/bin/dsh-app-ctl" && ok "ctl ping 只�
 if [ -f "$D/node-safe" ]; then
     sh -n "$D/node-safe" >/dev/null 2>&1 && ok "sh -n node-safe" || bad "sh -n node-safe"
 fi
-grep -q 'WCSRC/Info.plist' "$D/dsh-extras-postinst.sh" && ok "extras 真的安装全屏 Web Clip" || bad "extras 缺 Web Clip 安装"
+if grep -qE '^cp "\$WCSRC/Info\.plist"' "$D/dsh-extras-postinst.sh"; then
+    bad "extras 仍在安装 Web Clip 书签（+ios24.11 应只留原生 App）"
+else ok "+ios24.11 extras 不再安装 Web Clip 书签（桌面只留原生 App）"; fi
 # 自动链路不得写 $DSH_HOME
 if grep -vE '^[[:space:]]*#|^[[:space:]]*echo|^[[:space:]]*printf' \
         "$TMP/DEBIAN/postinst" "$TMP/DEBIAN/prerm" \
@@ -468,8 +470,8 @@ done
 node --check "$SRV" >/dev/null 2>&1 && ok "+ios24.9 bridge 语法通过" || bad "+ios24.9 bridge 语法错误"
 node --check "$LP" >/dev/null 2>&1 && ok "+ios24.9 面板语法通过" || bad "+ios24.9 面板语法错误"
 
-if [ "$VTAG" = "ios24.10" ]; then
-  sec "7d) +ios24.10 原生 App 主入口 + 灵动岛药丸形态"
+if [ "$VTAG" = "ios24.10" ] || [ "$VTAG" = "ios24.11" ]; then
+  sec "7d) 原生 App 主入口 + 灵动岛药丸形态（+ios24.10 起，24.11 保留）"
   NA="$APP/DSHNativeApp"
   [ -f "$NA" ] && ok "原生 App DSHNativeApp 已打包" || bad "缺原生 App DSHNativeApp"
   if [ -f "$NA" ]; then
@@ -482,12 +484,16 @@ d = plistlib.load(open(sys.argv[1], 'rb'))
 assert d.get('CFBundleExecutable') == 'DSHNativeApp'
 assert 'hidden' not in (d.get('SBAppTags') or [])
 PY
-  # 原生 UI 源码关键要素（主界面=进度、网页进设置）
+  # 原生 UI 源码关键要素（进度来源 / 设置页兜底）—— 两档都保留的共用部分
   NU="$HERE/../app-bundle/native-ui"
   for needle in 'DSHRootVC' 'verbLabel' '/progress' '/control' \
-                'DSHSettingsVC' 'SFSafariViewController' '127.0.0.1:3080'; do
+                'DSHSettingsVC' 'SFSafariViewController'; do
     grep -qrF "$needle" "$NU" && ok "原生 UI 源码含 $needle" || bad "原生 UI 源码缺 $needle"
   done
+  # +ios24.10 网页地址写死 3080；+ios24.11 改成读动态端口状态文件，不再写死
+  if [ "$VTAG" = "ios24.10" ]; then
+    grep -qrF '127.0.0.1:3080' "$NU" && ok "24.10 设置页网页地址 127.0.0.1:3080" || bad "24.10 缺 3080 地址"
+  fi
   # 药丸形态源码
   HSRC="$HERE/../phone-bridge/native/hud/HUDOverlay.m"
   for needle in 'verbLabel' 'shape' 'pill_w' 'colorWithWhite:0.02 alpha:0.97' 'setExpanded'; do
@@ -497,6 +503,45 @@ PY
   for needle in 'function humanVerb' 'noteRecent' 'verb: verb'; do
     grep -qF "$needle" "$SRV" && ok "人话状态 server 含 $needle" || bad "人话状态 server 缺 $needle"
   done
+fi
+
+if [ "$VTAG" = "ios24.11" ]; then
+  sec "7e) +ios24.11 全屏 WebView 主界面 + 动态端口 + 无书签"
+  NU="$HERE/../app-bundle/native-ui"
+  # 主界面改成全屏 WKWebView，带 SFSafari 降级兜底 + WebKit framework + 网络 entitlement
+  for needle in 'WKWebView' 'DSHWebVC' 'degradeToSafari' 'webViewWebContentProcessDidTerminate' \
+                'web-port' 'web-token'; do
+    grep -qrF "$needle" "$NU" && ok "原生 UI 全屏 WebView 含 $needle" || bad "原生 UI 缺 $needle"
+  done
+  grep -q -- '-framework WebKit' "$NU/build-native-app.sh" && ok "编译链含 WebKit framework" || bad "编译链缺 WebKit"
+  python3 - "$APP/entitlements.plist" <<'PY' && ok "App 含 WKWebView 网络 entitlement" || bad "App 缺 WKWebView 网络 entitlement"
+import plistlib, sys
+d = plistlib.load(open(sys.argv[1], 'rb'))
+assert d.get('com.apple.security.network.client') is True
+assert d.get('com.apple.security.network.server') is True
+PY
+  # AppDelegate 根控制器换成 DSHWebVC（不再是手写进度卡主界面）
+  grep -qF '[[DSHWebVC alloc] init]' "$NU/DSHAppDelegate.m" && ok "主界面根控制器 = DSHWebVC 全屏 WebView" || bad "主界面未切到全屏 WebView"
+  # 灵动岛 HUD 完全不动：仍读 hud.json
+  grep -qF 'hud.json' "$HERE/../phone-bridge/native/hud/HUDOverlay.m" && ok "灵动岛 HUD 仍读 hud.json（未改动）" || bad "灵动岛 HUD 链路变了"
+  # 动态端口：daemon 探测 + 探测器随包 + 状态文件原子写
+  grep -qF 'port-probe.cjs' "$X/var/jb/usr/bin/dsh-daemon" && ok "daemon 调用动态端口探测器" || bad "daemon 未接动态端口"
+  [ -f "$D/port-probe.cjs" ] && ok "port-probe.cjs 随包下发" || bad "缺 port-probe.cjs"
+  node --check "$D/port-probe.cjs" >/dev/null 2>&1 && ok "port-probe.cjs 语法通过" || bad "port-probe.cjs 语法错误"
+  grep -qF 'web-port' "$X/var/jb/usr/bin/dsh-daemon" && ok "daemon 写 web-port 状态文件" || bad "daemon 未写端口状态文件"
+  grep -qF 'refresh_port' "$D/dsh-extras-postinst.sh" && ok "postinst 探活读动态端口" || bad "postinst 探活仍写死端口"
+  # 端口冲突避让黑盒：占用 base 端口后探测器应换端口
+  node -e '
+    const net=require("net"),cp=require("child_process");
+    const b=net.createServer();
+    b.listen(0,"127.0.0.1",()=>{
+      const base=b.address().port;   // 用一个真实被占的端口
+      const out=cp.execSync("node "+process.argv[1]+" "+base).toString().trim();
+      b.close();
+      if(Number(out)!==base){console.log("  [ OK ] 端口冲突自动避让 "+base+" -> "+out);process.exit(0);}
+      console.error("  [FAIL] 端口冲突未避让 ("+base+")");process.exit(1);
+    });
+  ' "$D/port-probe.cjs" && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
 fi
 
 sec "8) 两次构建字节级可复现"
@@ -512,4 +557,4 @@ fi
 
 printf '\n=== 汇总: OK=%d FAIL=%d ===\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
-echo "✔ rc.3 全屏单包独立核验全部通过（含静态 Web Clip URL 鉴权黑盒）"
+echo "✔ rc.3 单包独立核验全部通过（固定 token 鉴权黑盒 + 全屏 WebView + 动态端口）"

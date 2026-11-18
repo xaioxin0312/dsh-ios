@@ -26,6 +26,17 @@
 	</array>
 	<key>com.apple.private.skip-library-validation</key>
 	<true/>
+	<!-- +ios24.11 全屏 WKWebView：WebContent 是独立 XPC 进程，即使宿主 no-container，
+	     它也需要自己的网络权限才能启动并联到 127.0.0.1。缺 network.client 会让
+	     WebContent 起不来/白屏（越狱 App Sileo 系标准配置同样带这两项）。 -->
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<key>com.apple.security.network.server</key>
+	<true/>
+	<key>com.apple.private.security.storage.AppBundles</key>
+	<true/>
+	<key>com.apple.private.security.storage.AppDataContainers</key>
+	<true/>
 	<key>get-task-allow</key>
 	<true/>
 </dict>

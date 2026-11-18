@@ -308,6 +308,10 @@ else
     echo "==> [3d-1] Node 22 档：保留稳定底座原运行时（不打 Node24 补丁）"
 fi
 
+# 3d-1b +ios24.11：动态端口探测器（daemon 启动时选空闲端口，避开 3080 冲突）。
+cp "$HERE/port-probe.cjs" "$STAGE/var/jb/usr/lib/dsh/port-probe.cjs"
+chmod 644 "$STAGE/var/jb/usr/lib/dsh/port-probe.cjs"
+
 # 3d-2 +ios24.10：native DSH.app 从「隐藏的 Safari 兜底」反转为主入口。
 # 主界面现在是原生 UIKit 写的实时进度（native-ui/DSHRootVC），不是书签、
 # 不是 Web Clip；网页工作台移到 App 的「设置」页里（SFSafariViewController）。
@@ -404,14 +408,30 @@ fi
 # +ios24.x 的 changelog 只写在 stage 副本里：共享 control 原文件一个字节不动。
 # +ios18 是已冻结的对照档（927b5308…），当前源码面向 +ios24.6，不再承诺
 # 从当前 HEAD 重新构建 +ios18 能 1:1 复现当时的历史产物。
-case "$TAG" in ios24.1|ios24.2|ios24.3|ios24.4|ios24.5|ios24.6|ios24.7|ios24.8|ios24.9|ios24.10) ;; *) skip_changelog=1 ;; esac
+case "$TAG" in ios24.1|ios24.2|ios24.3|ios24.4|ios24.5|ios24.6|ios24.7|ios24.8|ios24.9|ios24.10|ios24.11) ;; *) skip_changelog=1 ;; esac
 if [ "${skip_changelog:-0}" != "1" ]; then
     python3 - "$STAGE/DEBIAN/control" "$TAG" <<'PY'
 import sys
 p, tag = sys.argv[1:3]
 s = open(p, encoding='utf-8').read()
 extra = ""
-if tag == "ios24.10":
+if tag == "ios24.11":
+    extra = """ * 原生 App 主界面改为全屏加载 DSH 官方 Web UI（WKWebView），观感与官方
+   桌面端一致：没有地址栏 / 标签栏 / 工具栏，打开就是普通 APP；工作区 /
+   会话 / 插件 / 对话与终端敲 dsh 走的都是同一引擎同一份数据，行为不变；
+ * iOS 沙盒兼容做双保险：WKWebView 因 rootless 伪签无法启动 WebContent
+   时，App 自动降级到系统 Safari 视图打开同一地址，任何情况都不白屏；
+ * 彻底移除 Web Clip 书签：桌面只留随 deb 安装的原生 App（装包即装 App，
+   与官方桌面端一致），升级时残留的旧书签入口自动清除；
+ * Web 端口动态分配：daemon 启动时探测 3080，被占用则自动递增（3081…），
+   把实际端口与 token 原子写到状态文件供 App 读取 —— 解决真机遇到的
+   3080 端口冲突；端口空闲时行为与旧版完全相同，不改变终端启动方式；
+ * 灵动岛实时进度胶囊继续由独立 SpringBoard HUD 读 hud.json 驱动，与本
+   界面解耦，不依赖 APNs，App 退后台仍实时刷新；
+ * 保留 +ios24.10 / +ios24.9 的灵动岛药丸 / 恒定工具集 / 增量读屏 /
+   串行走廊 / 人话状态等全部历史能力，升级不丢插件 / 工作区 / 对话 / 配置。
+"""
+elif tag == "ios24.10":
     extra = """ * 桌面入口从网页书签改为真正的原生 App：打开即是原生 UIKit 写的
    手机操控实时进度主页（状态灯 / 人话动作 / 第 n/N 步 / 最近 3 条操作 /
    暂停继续 / 停止 / 插话 / 交还确认卡），数据直读本机 bridge，无需先开
@@ -575,6 +595,7 @@ for f in \
   "$STAGE/var/jb/usr/bin/dsh-app-ctl" \
   "$STAGE/var/jb/usr/bin/dsh-app-ui" \
   "$STAGE/var/jb/usr/bin/dsh-app-helper" \
+  "$STAGE/var/jb/usr/lib/dsh/port-probe.cjs" \
   "$STAGE/var/jb/usr/lib/dsh/bin/node" \
   "$STAGE/var/jb/usr/lib/dsh/libexec/pnpm/bin/pnpm.cjs" \
   "$STAGE/var/jb/usr/lib/dsh/libexec/pnpm/dist/pnpm.cjs" \
@@ -782,6 +803,25 @@ done
 grep -qF '"$APP/DSHNativeApp"' "$STAGE/var/jb/usr/lib/dsh/dsh-extras-postinst.sh" || {
     echo "构建中止：postinst 未处理 DSHNativeApp" >&2; exit 1; }
 echo "    +ios24.10 断言通过（原生 App 主入口 / 药丸形态 / 人话状态）"
+
+# +ios24.11：全屏 WebView 主界面 + 动态端口（无 TAG 分支，随包强制校验）
+echo "==> 构建期 +ios24.11 断言（全屏 WebView / 动态端口 / 无书签）"
+[ -f "$STAGE/var/jb/usr/lib/dsh/port-probe.cjs" ] || { echo "构建中止：缺 port-probe.cjs" >&2; exit 1; }
+node --check "$STAGE/var/jb/usr/lib/dsh/port-probe.cjs" || exit 1
+grep -qF 'port-probe.cjs' "$STAGE/var/jb/usr/bin/dsh-daemon" || { echo "构建中止：daemon 未接动态端口" >&2; exit 1; }
+# App 可执行文件需真的链接 WebKit（CI 编译产物）
+if command -v otool >/dev/null 2>&1; then
+    otool -L "$NA" 2>/dev/null | grep -q WebKit || { echo "构建中止：DSHNativeApp 未链接 WebKit" >&2; exit 1; }
+fi
+python3 - "$STAGE/var/jb/Applications/DSH.app/entitlements.plist" <<'PY'
+import plistlib, sys
+d = plistlib.load(open(sys.argv[1], 'rb'))
+assert d.get('com.apple.security.network.client') is True, '缺 WKWebView network.client entitlement'
+PY
+# postinst 不得再安装 Web Clip 书签
+if grep -qE '^cp "\$WCSRC/Info\.plist"' "$STAGE/var/jb/usr/lib/dsh/dsh-extras-postinst.sh"; then
+    echo "构建中止：postinst 仍在安装 Web Clip 书签" >&2; exit 1; fi
+echo "    +ios24.11 断言通过（全屏 WebView / 动态端口 / 无书签）"
 
 for f in "$STAGE/var/jb/usr/bin/dsh" "$STAGE/var/jb/usr/bin/dsh-daemon" \
          "$STAGE/var/jb/usr/bin/dsh-app-ctl" "$STAGE/var/jb/usr/bin/dsh-app-ui" \

@@ -67,7 +67,7 @@ mkdir -p "$JBROOT/Applications/DSH.app" "$JBROOT/usr/bin" \
          "$H/profiles/web" "$H/pnpm" "$H/pnpm-cache" "$H/npm-cache"
 
 # .app / plist 占位（postinst 会 chmod / ldid 它们，全在 $DSH_HOME 外）
-for f in DSHLauncher Info.plist entitlements.plist Icon60x60@2x.png; do
+for f in DSHNativeApp DSHLauncher Info.plist entitlements.plist Icon60x60@2x.png; do
     : > "$JBROOT/Applications/DSH.app/$f"
 done
 : > "$JBROOT/Library/LaunchDaemons/dev.airdevs.dsh.plist"
@@ -162,17 +162,21 @@ sec "2) 执行原封不动的 postinst（app-bundle + one-package）"
 run_script "app-bundle-postinst"  "$APPB/DEBIAN/postinst"
 run_script "one-package-postinst" "$ONE/DEBIAN/postinst"
 
-# Web Clip 必须真的被装上（旧版 extras 没进包，这一步恒失败）
-sec "3) 全屏 Web Clip 确实被安装（旧版构建链断裂点）"
-for f in Info.plist icon.png Icon.png; do
-    [ -f "$WCSIM/$f" ] && ok "Web Clip $f 已落地" || bad "Web Clip $f 缺失"
-done
-python3 - "$WCSIM/Info.plist" "$TOKEN" <<'PY'
+# +ios24.11：桌面只留原生 App，Web Clip 书签必须【没有】被安装。
+sec "3) Web Clip 书签未被安装 + 原生 App 随包落地（+ios24.11 形态）"
+if [ -e "$WCSIM" ] && [ -f "$WCSIM/Info.plist" ]; then
+    bad "Web Clip 仍被安装（+ios24.11 应只留原生 App）"
+else ok "Web Clip 书签未安装（桌面只留原生 App）"; fi
+# 原生 App 可执行文件必须随包进模拟树
+[ -f "$JBROOT/Applications/DSH.app/DSHNativeApp" ] && \
+    ok "原生 App DSHNativeApp 随包安装" || bad "缺原生 App DSHNativeApp"
+# token 单一真相源仍一致（源码 webclip plist 作为校验载体）
+python3 - "$ONE/webclip/Info.plist" "$TOKEN" <<'PY'
 import plistlib, sys
 d = plistlib.load(open(sys.argv[1], 'rb'))
-assert d.get('FullScreen') is True, 'Web Clip 非 FullScreen'
-assert d.get('URL', '').endswith('?token=' + sys.argv[2]), 'Web Clip URL token 不一致'
-print('  [ ok  ] Web Clip FullScreen=true 且 URL 带正确 token')
+assert d.get('FullScreen') is True, 'webclip 校验载体非 FullScreen'
+assert d.get('URL', '').endswith('?token=' + sys.argv[2]), 'webclip 校验载体 token 不一致'
+print('  [ ok  ] token 单一真相源一致（webclip 校验载体 FullScreen + 正确 token）')
 PY
 
 # --- ⑤ 跑原封不动的两套 prerm -------------------------------------------

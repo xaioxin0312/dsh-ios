@@ -6,7 +6,12 @@
 #import "DSHSettingsVC.h"
 #import <SafariServices/SafariServices.h>
 
-static NSString *const kWebURL = @"http://127.0.0.1:3080/?token=dshios-fixed-token-8f3a2c";
+// 端口/token 运行时从 daemon 状态文件读（动态端口避开 3080 冲突）；
+// 读不到回退到编译期常量，绝不因为状态文件缺失而打不开网页。
+static NSString *const kPortFile  = @"/var/jb/var/log/dsh-app/web-port";
+static NSString *const kTokenFile = @"/var/jb/var/log/dsh-app/web-token";
+static NSString *const kDefaultPort  = @"3080";
+static NSString *const kDefaultToken = @"dshios-fixed-token-8f3a2c";
 static NSString *const kBridge = @"http://127.0.0.1:8091";
 
 @interface DSHSettingsVC () <SFSafariViewControllerDelegate>
@@ -61,8 +66,15 @@ static NSString *const kBridge = @"http://127.0.0.1:8091";
     [tv deselectRowAtIndexPath:ip animated:YES];
     NSString *a = self.sections[ip.section][@"rows"][ip.row][@"a"];
     if ([a isEqualToString:@"web"]) {
+        NSString *port = [NSString stringWithContentsOfFile:kPortFile encoding:NSUTF8StringEncoding error:nil];
+        port = [port stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (!port.length) port = kDefaultPort;
+        NSString *token = [NSString stringWithContentsOfFile:kTokenFile encoding:NSUTF8StringEncoding error:nil];
+        token = [token stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (!token.length) token = kDefaultToken;
+        NSString *webURL = [NSString stringWithFormat:@"http://127.0.0.1:%@/?token=%@", port, token];
         SFSafariViewController *sf = [[SFSafariViewController alloc]
-            initWithURL:[NSURL URLWithString:kWebURL]];
+            initWithURL:[NSURL URLWithString:webURL]];
         sf.delegate = self;
         sf.preferredBarTintColor = [UIColor colorWithRed:0.09 green:0.10 blue:0.12 alpha:1.0];
         sf.preferredControlTintColor = [UIColor colorWithRed:0.20 green:0.78 blue:0.62 alpha:1.0];

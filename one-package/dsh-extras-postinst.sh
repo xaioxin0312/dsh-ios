@@ -34,7 +34,8 @@ WCSRC="$D/webclip"
 PORT="${DSH_WEB_PORT:-3080}"
 # 单一真相源：构建期从 one-package/dsh-web-token 复制进包，与 Web Clip URL /
 # launchd plist / apply_fixed_token_patch.cjs 缺省值逐字一致。
-TOKEN=$(tr -d '\r\n' < "$WCSRC/token" 2>/dev/null || true)
+TOKEN=""
+[ -f "$WCSRC/token" ] && TOKEN=$(tr -d '\r\n' < "$WCSRC/token" 2>/dev/null || true)
 [ -n "$TOKEN" ] || TOKEN=dshios-fixed-token-8f3a2c
 # 设备端为 SpringBoard 读取的真实路径；DSH_WEBCLIP_DIR 仅供沙箱实测隔离。
 WCDIR="${DSH_WEBCLIP_DIR:-/var/mobile/Library/WebClips/133239ba-d3d0-422d-ba40-7945156fd8ea.webclip}"
@@ -73,9 +74,18 @@ mkdir -p "$LOGDIR" 2>/dev/null || true
 # 手机操控 bridge：只启动服务；MCP 注册由 dsh wrapper 在启动前幂等完成。
 if [ -x "$BRCTL" ]; then "$BRCTL" enable >/dev/null 2>&1 || true; fi
 
+# +ios24.11：daemon 会把实际选中端口写到 $LOGDIR/web-port（3080 空闲时就是 3080）。
+# 探活前刷新一次，兼容动态端口；状态文件尚未出现时沿用 plist 的 3080。
+refresh_port() {
+    [ -f "$LOGDIR/web-port" ] || return 0
+    _p=$(tr -d '\r\n\t ' < "$LOGDIR/web-port" 2>/dev/null || true)
+    case "$_p" in ''|*[!0-9]*) : ;; *) PORT="$_p" ;; esac
+}
+
 # 真探活：只认 303（固定 token 换 cookie）或 200（已有会话），401 一律失败。
 # 用 node-safe 零 JIT 启动器，不依赖 curl/nc，也不会在 A11 上 SIGBUS。
 probe_ok() {
+    refresh_port
     [ -x "$D/node-safe" ] || return 1
     "$D/node-safe" -e '
       const http=require("http");
@@ -112,31 +122,23 @@ i=0; while [ "$i" -lt 10 ]; do
     i=$((i+1)); sleep 0.3 2>/dev/null || true
 done
 
-# --- 2) 清理所有指向本端口的旧 Web Clip，写全新的一份 ----------------------
-# 旧版 Web Clip 可能是无 token / 旧随机 token / 缺 Title 的 "Untitled"，
-# SpringBoard 还会缓存它。全部删掉再写，保证桌面只留一个正确入口。
-# 只删 URL 指向 127.0.0.1:${PORT} 的 DSH Web Clip，用户其它 Web Clip 不碰。
+# --- 2) +ios24.11：彻底移除 Web Clip 书签，桌面只留原生 App -----------------
+# 旧版装过 Web Clip（无 token / 旧随机 token / 各种 Title），SpringBoard 还会缓存。
+# 现在主入口就是随 deb 安装的原生 App（和官方桌面端一样），不再需要任何书签兜底。
+# 这里清理所有指向本机 DSH loopback（127.0.0.1:任意端口 + 本包 token）的旧 Web Clip，
+# 用户其它 Web Clip 一律不碰。按 token 前缀匹配，兼容动态端口与历史 3080。
 if [ -d "$WCLIB" ]; then
     for d in "$WCLIB"/*.webclip; do
         [ -d "$d" ] || continue
         [ -f "$d/Info.plist" ] || continue
-        if grep -q "127.0.0.1:${PORT}" "$d/Info.plist" 2>/dev/null; then
+        if grep -q '127\.0\.0\.1:.*token=' "$d/Info.plist" 2>/dev/null || \
+           grep -q 'dshios-fixed-token' "$d/Info.plist" 2>/dev/null; then
             rm -rf "$d" 2>/dev/null || true
         fi
     done
 fi
-if [ -f "$WCSRC/Info.plist" ]; then
-    mkdir -p "$WCDIR" 2>/dev/null || true
-    cp "$WCSRC/Info.plist" "$WCDIR/Info.plist" 2>/dev/null || true
-    cp "$WCSRC/icon.png"   "$WCDIR/icon.png"   2>/dev/null || true
-    cp "$WCSRC/icon.png"   "$WCDIR/Icon.png"   2>/dev/null || true
-    # 只 chown 本包新建的这一个目录，不碰用户其它 Web Clip，更不碰 $DSH_HOME。
-    chown -R 501:501 "$WCDIR" 2>/dev/null || true
-    grep -q "?token=$TOKEN" "$WCDIR/Info.plist" 2>/dev/null || \
-        echo "dsh: [warn] Web Clip URL 的 token 与常量文件不一致，请重装 deb" >&2
-else
-    echo "dsh: [ERROR] 缺 $WCSRC/Info.plist，全屏 Web Clip 未安装；此 deb 构建不完整！" >&2
-fi
+# 明确不再写 WCDIR；若它还存在（本次或上次遗留），一并清掉。
+rm -rf "$WCDIR" 2>/dev/null || true
 
 # --- 3) 重新加载并强制 kickstart -k ---------------------------------------
 if [ -n "$LC" ]; then
@@ -193,11 +195,13 @@ chown 501:501 "$HUDSTATE" 2>/dev/null || true
 chmod 755 "$HUDSTATE" 2>/dev/null || true
 rm -f "$HUDSTATE/hud.ack.json" 2>/dev/null || true
 
-echo "DeepSeek Harness 单包：DSH 0.2.2-rc.3 + 原生实时进度 App 已就绪。"
-echo "  +ios24.10：桌面主入口变成原生 App —— 打开即是手机操控实时进度（状态/步数/最近操作/暂停停止插话）；"
-echo "  网页工作台移到 App 的「设置 → 打开 DSH 网页工作台」里，工作区 / 会话 / 插件全部保留。"
+echo "DeepSeek Harness 单包：DSH 0.2.2-rc.3 + 原生 App（全屏 Web UI）已就绪。"
+echo "  +ios24.11：桌面只有随 deb 安装的原生 App —— 打开即全屏加载 DSH 官方 Web UI，"
+echo "  观感与官方桌面端一致（无浏览器控件）；原生层若起不来会自动退回系统浏览器，绝不白屏。"
+echo "  网页工作台 / 工作区 / 会话 / 插件全部保留；端口动态分配（3080 冲突自动递增），"
+echo "  不占端口时不改变任何行为；从 App 或终端启动 dsh 都走同一引擎。"
 echo "  灵动岛进度：SpringBoard 药丸显示人话动作，需 respring 一次让 HUD 注入生效；"
 echo "  看不到时终端跑 dsh-phone-bridge-ctl hud 做完整诊断。"
-echo "  全屏 Web Clip 仍保留为兜底入口；开机自启异常时跑 dsh-autostart status 诊断。"
+echo "  不再安装任何 Web Clip 书签，旧的书签入口升级时已自动清除。"
 echo "  若桌面仍是旧图标，请 respring 一次（SpringBoard 会缓存图标）。"
 exit 0

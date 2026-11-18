@@ -1,16 +1,16 @@
 /*
  * DSHAppDelegate — DeepSeek Harness 原生 App 入口。
  *
- * 与旧的 SFSafariViewController 壳不同：本 App 的主界面是原生 UIKit 写的
- * 「实时操控进度」面板（DSHRootVC），直接读本机 bridge 127.0.0.1:8091 的
- * /progress 与 /control。DSH 网页工作台不再是主界面，而是「设置」页里的
- * 一个入口（DSHSettingsVC）。
+ * 主界面 = 全屏 WKWebView 加载 DSH 官方 Web UI（DSHWebVC），观感与官方
+ * 桌面端一致：没有浏览器 chrome，就是普通 APP。端口/token 运行时从 daemon
+ * 写的状态文件读取（动态端口，避开 3080 冲突）；WKWebView 若因 rootless
+ * 手签起不来，自动降级 SFSafariViewController，绝不白屏。
  *
- * 自己写的界面语言：深色石墨底 + 青绿强调 + 大圆角卡片 + 状态灯，
- * 不复制 DSHGo / fish-pocket 的布局与配色。
+ * 灵动岛进度由独立 SpringBoard HUD 读 hud.json 驱动，与本 App 解耦。
+ * 设置页（DSHSettingsVC）里保留网页工作台兜底入口与桥状态诊断。
  */
 #import "DSHAppDelegate.h"
-#import "DSHRootVC.h"
+#import "DSHWebVC.h"
 
 @implementation DSHAppDelegate
 
@@ -18,13 +18,7 @@
 didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
     UIWindow *window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
     window.tintColor = [UIColor colorWithRed:0.20 green:0.78 blue:0.62 alpha:1.0];
-
-    DSHRootVC *root = [[DSHRootVC alloc] init];
-    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:root];
-    nav.navigationBar.prefersLargeTitles = YES;
-    nav.navigationBar.barStyle = UIBarStyleBlack;
-
-    window.rootViewController = nav;
+    window.rootViewController = [[DSHWebVC alloc] init];
     [window makeKeyAndVisible];
     self.window = window;
     return YES;

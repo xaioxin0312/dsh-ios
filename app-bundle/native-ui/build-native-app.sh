@@ -36,10 +36,11 @@ echo "==> SDK: $SDK"
       -I"$HERE" \
       "$HERE/main.m" \
       "$HERE/DSHAppDelegate.m" \
+      "$HERE/DSHWebVC.m" \
       "$HERE/DSHRootVC.m" \
       "$HERE/DSHSettingsVC.m" \
       -o "$OUT" \
-      -framework UIKit -framework Foundation -framework SafariServices -framework QuartzCore \
+      -framework UIKit -framework Foundation -framework WebKit -framework SafariServices -framework QuartzCore \
       -Wl,-no_uuid \
       -Wl,-sectcreate,__TEXT,__info_plist,"$PLIST"
 if command -v ldid >/dev/null 2>&1; then
