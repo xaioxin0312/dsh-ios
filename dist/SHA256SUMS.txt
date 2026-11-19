@@ -288,6 +288,16 @@ eb6be7ed2e06ec9d5fa71dc2ca34f85b630e69171c96a3aeaaf94c3c39e6c8d5  dev.airdevs.ds
 5d28e855dd80b19edc4f1a1244ee2201ebbe05d9eeaf4ed1b6793a90ff1463b5  ../phone-bridge/native/hud/dsh-ios-hud.dylib
 e43bfad4986084e30e7f984000ba83967d14e38c185c122bd29beaedc8325744  ../app-bundle/prebuilt/DSHNativeApp
 
+# +ios24.12（2026-11-19）：App 打开主动拉起 DSH + 终端复用实例打印链接。
+#   原生 App 启动时 posix_spawn 调 setuid helper（/var/jb/usr/bin/dsh-app-helper，
+#   执行幂等 dsh-app-ctl ensure），后台线程等 daemon 可连后再加载 Web 工作台；
+#   终端无参 dsh 读 web-port/web-token 状态文件 ping 已有实例，通了打印
+#   http://127.0.0.1:端口/?token=... 并退出，不起第二个。HUD dylib 未改（沿用 24.11 值）。
+1fd86988ee9371bf2890f8cf7c1812521fc158eb1333b16a62f33ac18014d215  dev.airdevs.dsh_0.2.2-rc.3+ios24.12_iphoneos-arm64.deb
+43bb13d19d3559ecb78e5bc210e9ee6b58d16abb2a5ab5cc0b738a386e2f75cb  ../app-bundle/prebuilt/DSHNativeApp
+# setuid helper（App 主动启动用，源码未变、CI 无需重编，随包 4755）
+235443a624cf6c2a34d851d566bf871cf8baf38ae37b63ace0ba372825c4ba09  ../app-bundle/prebuilt/dsh-app-helper
+
 # --- 可选生态插件（手动安装，不预装）---
 f9f74e0f485148acfe544b88e35c17da196b6ff4c6da4f7a6576a7c566cd068a  dsh-ios-phone-control-0.1.0.tgz
 
