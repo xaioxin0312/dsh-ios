@@ -22,6 +22,8 @@
 #import <SafariServices/SafariServices.h>
 #import <spawn.h>
 #import <sys/wait.h>
+#import <unistd.h>
+#import <dispatch/dispatch.h>
 
 extern char **environ;
 
