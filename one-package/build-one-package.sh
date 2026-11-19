@@ -408,14 +408,25 @@ fi
 # +ios24.x 的 changelog 只写在 stage 副本里：共享 control 原文件一个字节不动。
 # +ios18 是已冻结的对照档（927b5308…），当前源码面向 +ios24.6，不再承诺
 # 从当前 HEAD 重新构建 +ios18 能 1:1 复现当时的历史产物。
-case "$TAG" in ios24.1|ios24.2|ios24.3|ios24.4|ios24.5|ios24.6|ios24.7|ios24.8|ios24.9|ios24.10|ios24.11) ;; *) skip_changelog=1 ;; esac
+case "$TAG" in ios24.1|ios24.2|ios24.3|ios24.4|ios24.5|ios24.6|ios24.7|ios24.8|ios24.9|ios24.10|ios24.11|ios24.12) ;; *) skip_changelog=1 ;; esac
 if [ "${skip_changelog:-0}" != "1" ]; then
     python3 - "$STAGE/DEBIAN/control" "$TAG" <<'PY'
 import sys
 p, tag = sys.argv[1:3]
 s = open(p, encoding='utf-8').read()
 extra = ""
-if tag == "ios24.11":
+if tag == "ios24.12":
+    extra = """ * 像官方桌面端那样：点开 App 即主动拉起 DSH 引擎 —— 原生 App 启动时
+   调用包内 setuid helper 执行幂等的 dsh-app-ctl ensure，daemon 没跑才
+   bootstrap，已在跑则秒回，等真正可连后再加载 Web 工作台，后台进行不卡界面；
+ * 终端敲 dsh 若发现已有实例（App 已拉起），不再起第二个、不再端口冲突，
+   而是直接打印该实例对应的网页地址 http://127.0.0.1:端口/?token=...，
+   终端与 App 共享同一引擎同一份数据；带子命令（web / plugin 等）行为不变；
+ * 完全保留 +ios24.11 的全屏 WebView / 动态端口 / 无书签，以及灵动岛
+   SpringBoard 药丸实时进度、恒定工具集 / 增量读屏 / 串行走廊 / 人话状态
+   等全部历史能力，升级不丢插件 / 工作区 / 对话 / 配置。
+"""
+elif tag == "ios24.11":
     extra = """ * 原生 App 主界面改为全屏加载 DSH 官方 Web UI（WKWebView），观感与官方
    桌面端一致：没有地址栏 / 标签栏 / 工具栏，打开就是普通 APP；工作区 /
    会话 / 插件 / 对话与终端敲 dsh 走的都是同一引擎同一份数据，行为不变；
@@ -822,6 +833,19 @@ PY
 if grep -qE '^cp "\$WCSRC/Info\.plist"' "$STAGE/var/jb/usr/lib/dsh/dsh-extras-postinst.sh"; then
     echo "构建中止：postinst 仍在安装 Web Clip 书签" >&2; exit 1; fi
 echo "    +ios24.11 断言通过（全屏 WebView / 动态端口 / 无书签）"
+
+# +ios24.12：App 主动拉起 daemon（setuid helper）+ 终端复用实例打印链接
+echo "==> 构建期 +ios24.12 断言（App 主动启动 / 终端复用链接）"
+NU="$APPB/native-ui"
+grep -qF 'dsh-app-helper' "$NU/DSHWebVC.m" || { echo "构建中止：App 未接 setuid helper" >&2; exit 1; }
+grep -qF 'posix_spawn' "$NU/DSHWebVC.m" || { echo "构建中止：App 未用 posix_spawn 拉起 helper" >&2; exit 1; }
+grep -qF 'ensureDaemonThenLoad' "$NU/DSHWebVC.m" || { echo "构建中止：App 缺启动引导方法" >&2; exit 1; }
+# setuid helper 必须在包里且 4755
+[ -f "$STAGE/var/jb/usr/bin/dsh-app-helper" ] || { echo "构建中止：缺 dsh-app-helper" >&2; exit 1; }
+grep -qF '网页工作台：http://127.0.0.1' "$STAGE/var/jb/usr/bin/dsh" || { echo "构建中止：dsh 未接复用打印链接" >&2; exit 1; }
+grep -qF '_PF="$_LOGDIR/web-port"' "$STAGE/var/jb/usr/bin/dsh" || { echo "构建中止：dsh 未读端口状态文件" >&2; exit 1; }
+sh -n "$STAGE/var/jb/usr/bin/dsh" || exit 1
+echo "    +ios24.12 断言通过（App 主动启动 / 终端复用链接）"
 
 for f in "$STAGE/var/jb/usr/bin/dsh" "$STAGE/var/jb/usr/bin/dsh-daemon" \
          "$STAGE/var/jb/usr/bin/dsh-app-ctl" "$STAGE/var/jb/usr/bin/dsh-app-ui" \

@@ -8,12 +8,34 @@
 > 关于 Node 24.9：**（rc.1 时代的历史结论）** 当时公开可得的 iOS arm64 Node 可执行文件确实不存在（详见 [`docs/DSH-NODE-UPGRADE-EVALUATION.md`](docs/DSH-NODE-UPGRADE-EVALUATION.md)），但实证发现官方 `0.2.2-rc.1` 的四处 Node 22.12 兼容补丁锚点与 `0.2.1-rc.5` **逐字一致**，因此用同一套补丁 + 同一个已验证的 Node 22.12.0，做出了经 31 项核验（含真 boot、会话创建与恢复）的完整升级包。
 >
 > **⚠️ 2026-11-14 更正**：上面「不存在」的结论已被本仓库自己的 CI 推翻 —— GitHub Actions run `43532556241` 成功编译出 **Node v24.19.0 iOS arm64 独立 CLI**（artifact `14095226518` / Release `node24-exp`，SHA `8bebb2a2…`）。且 rc.3 的 `engines.node >= 24.9.0` **不是 advisory**（`bin.js` 用 `import.meta.main`）。故 rc.3 单包已改用该成品。首版 `+ios24` 在 A11 真机上暴露运行时不兼容，
-**当前推荐档位是 `+ios24.11` 正式版**（原生 App 主界面 = 全屏加载 DSH 官方 Web UI，对标官方桌面端观感 + 动态端口 + 无书签），
-详见下方「正式版 +ios24.11」章节与 `one-package/README.md`。
+**当前推荐档位是 `+ios24.12` 正式版**（点开 App 像官方那样主动拉起 DSH + 终端敲 `dsh` 复用同一实例打印网页链接，完整保留 +ios24.11 全屏 WebView / 动态端口 / 无书签 / 灵动岛），
+详见下方「正式版 +ios24.12」章节与 `one-package/README.md`。
 
 ---
 
-## 正式版 · `+ios24.11`（2026-11-18，全屏 WebView 主界面 + 动态端口 + 无书签）
+## 正式版 · `+ios24.12`（2026-11-19，App 主动启动 + 终端复用实例）
+
+> 当前推荐安装的正式版。Release 附件：
+> `dev.airdevs.dsh_0.2.2-rc.3+ios24.12_iphoneos-arm64.deb`。
+>
+> 对标官方桌面端「打开 App 即启动引擎」的体验，补上两处启动链路：
+>
+> - **App 打开即主动拉起 DSH**：原生 App 启动时通过包内 setuid helper 执行幂等的
+>   `dsh-app-ctl ensure`（daemon 没跑才 bootstrap，已在跑秒回），等 Web 工作台真正
+>   可连后再加载界面，全程在后台线程不卡 UI。此前主入口换成 UIKit App 后这条链断了、
+>   只靠 launchd 常驻，现把它接回来。
+> - **终端敲 `dsh` 复用同一实例**：若 App 已把 DSH 拉起，终端 `dsh` 不再起第二个、
+>   不端口冲突，直接打印该实例对应的网页地址
+>   `http://127.0.0.1:端口/?token=...`；带子命令（`web` / `plugin` 等）行为照旧。
+> - **核心 KPI 不受影响**：灵动岛实时进度仍由独立 SpringBoard HUD 读 `hud.json`
+>   驱动（phone-bridge 写），与 3080 这个 Web daemon 完全解耦；持仓数据 / 对话 /
+>   插件 / 工作区零改动。
+>
+> 完整保留 `+ios24.11` 的全屏 WebView 主界面（观感同官方桌面端）、动态端口避让、
+> 无书签，以及 `+ios24.10` / `+ios24.9` 的灵动岛药丸 / 恒定工具集 / 增量读屏 /
+> 串行走廊 / 人话状态等全部能力。
+
+## 历史版本 · `+ios24.11`（2026-11-18，全屏 WebView 主界面 + 动态端口 + 无书签）
 
 > 当前推荐安装的正式版。Release 附件：
 > `dev.airdevs.dsh_0.2.2-rc.3+ios24.11_iphoneos-arm64.deb`。

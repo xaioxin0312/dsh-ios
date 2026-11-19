@@ -20,6 +20,10 @@
 #import "DSHSettingsVC.h"
 #import <WebKit/WebKit.h>
 #import <SafariServices/SafariServices.h>
+#import <spawn.h>
+#import <sys/wait.h>
+
+extern char **environ;
 
 static NSString *const kPortFile  = @"/var/jb/var/log/dsh-app/web-port";
 static NSString *const kTokenFile = @"/var/jb/var/log/dsh-app/web-token";
@@ -59,8 +63,31 @@ static NSString *const kBridge = @"http://127.0.0.1:8091";
     [self buildWebView];
     [self buildCapsule];
     [self buildSettingsButton];
-    self.targetURL = [self buildURL];
-    [self loadTarget];
+    // +ios24.12：像官方桌面端那样，App 打开就主动拉起 DSH 引擎。
+    // 用包内 setuid helper 执行幂等的 `dsh-app-ctl ensure`——daemon 已在跑
+    // 就秒回，没跑才 bootstrap+kickstart。放到后台队列，不阻塞主线程；
+    // 完成后回主线程按状态文件里的真实端口加载 WebView（绝不用写死 3080）。
+    [self ensureDaemonThenLoad];
+}
+
+// 主动拉起 daemon 后加载 Web UI。helper 缺失/失败都降级为直接加载，绝不白屏。
+- (void)ensureDaemonThenLoad {
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        const char *helper = "/var/jb/usr/bin/dsh-app-helper";
+        if (access(helper, X_OK) == 0) {
+            pid_t pid = -1;
+            char *const argv[] = { (char *)helper, NULL };
+            // helper 自身执行 setuid(0) + dsh-app-ctl ensure（幂等，已跑即返回）。
+            if (posix_spawn(&pid, helper, NULL, NULL, argv, environ) == 0 && pid > 0) {
+                int st = 0;
+                waitpid(pid, &st, 0);  // ensure 内部探活最多 ~8s，子线程等待不卡 UI
+            }
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.targetURL = [self buildURL];
+            [self loadTarget];
+        });
+    });
 }
 
 #pragma mark - WebView

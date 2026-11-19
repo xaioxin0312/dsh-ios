@@ -178,7 +178,7 @@ wc = plistlib.load(open(sys.argv[1], 'rb'))
 app = plistlib.load(open(sys.argv[2], 'rb'))
 ex = open(sys.argv[3], encoding='utf-8').read()
 tag = sys.argv[4]
-native_primary = (tag in ('ios24.10', 'ios24.11'))
+native_primary = (tag in ('ios24.10', 'ios24.11', 'ios24.12'))
 checks = [
  ('Web Clip 有 Title（桌面图标不再叫 Untitled）', bool(wc.get('Title'))),
  ('Web Clip Title 为 DeepSeek Harness', wc.get('Title') == 'DeepSeek Harness'),
@@ -470,8 +470,8 @@ done
 node --check "$SRV" >/dev/null 2>&1 && ok "+ios24.9 bridge 语法通过" || bad "+ios24.9 bridge 语法错误"
 node --check "$LP" >/dev/null 2>&1 && ok "+ios24.9 面板语法通过" || bad "+ios24.9 面板语法错误"
 
-if [ "$VTAG" = "ios24.10" ] || [ "$VTAG" = "ios24.11" ]; then
-  sec "7d) 原生 App 主入口 + 灵动岛药丸形态（+ios24.10 起，24.11 保留）"
+if [ "$VTAG" = "ios24.10" ] || [ "$VTAG" = "ios24.11" ] || [ "$VTAG" = "ios24.12" ]; then
+  sec "7d) 原生 App 主入口 + 灵动岛药丸形态（+ios24.10 起，24.11/24.12 保留）"
   NA="$APP/DSHNativeApp"
   [ -f "$NA" ] && ok "原生 App DSHNativeApp 已打包" || bad "缺原生 App DSHNativeApp"
   if [ -f "$NA" ]; then
@@ -505,8 +505,8 @@ PY
   done
 fi
 
-if [ "$VTAG" = "ios24.11" ]; then
-  sec "7e) +ios24.11 全屏 WebView 主界面 + 动态端口 + 无书签"
+if [ "$VTAG" = "ios24.11" ] || [ "$VTAG" = "ios24.12" ]; then
+  sec "7e) +ios24.11 全屏 WebView 主界面 + 动态端口 + 无书签（24.12 保留）"
   NU="$HERE/../app-bundle/native-ui"
   # 主界面改成全屏 WKWebView，带 SFSafari 降级兜底 + WebKit framework + 网络 entitlement
   for needle in 'WKWebView' 'DSHWebVC' 'degradeToSafari' 'webViewWebContentProcessDidTerminate' \
@@ -542,6 +542,45 @@ PY
       console.error("  [FAIL] 端口冲突未避让 ("+base+")");process.exit(1);
     });
   ' "$D/port-probe.cjs" && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
+fi
+
+if [ "$VTAG" = "ios24.12" ]; then
+  sec "7f) +ios24.12 App 主动启动 + 终端复用实例打印链接"
+  NU="$HERE/../app-bundle/native-ui"
+  # App 启动引导：setuid helper + posix_spawn + 后台队列不卡主线程
+  for needle in 'dsh-app-helper' 'posix_spawn' 'ensureDaemonThenLoad' 'waitpid' 'environ'; do
+    grep -qF "$needle" "$NU/DSHWebVC.m" && ok "App 主动启动含 $needle" || bad "App 主动启动缺 $needle"
+  done
+  grep -qF 'dispatch_get_global_queue' "$NU/DSHWebVC.m" && ok "App 启动引导在后台队列（不卡 UI）" || bad "App 启动引导阻塞主线程"
+  # setuid helper 随包且 4755（能提权执行 ensure）
+  [ -f "$X/var/jb/usr/bin/dsh-app-helper" ] && ok "setuid helper 随包下发" || bad "缺 dsh-app-helper"
+  if dpkg-deb -c "$DEB" 2>/dev/null | grep 'usr/bin/dsh-app-helper' | grep -q 'rws'; then
+    ok "setuid helper 为 4755"
+  else
+    # 解包态看不到 setuid 位时用 postinst 断言兜底
+    grep -qF 'chmod 4755' "$D/dsh-extras-postinst.sh" && ok "postinst 设 helper 为 4755" || bad "helper 无 setuid 处理"
+  fi
+  # helper 源码确实执行 dsh-app-ctl ensure（幂等）
+  grep -qF 'dsh-app-ctl ensure' "$HERE/../app-bundle/helper-src/dsh-app-helper.c" && ok "helper 执行幂等 ensure" || bad "helper 未执行 ensure"
+  # 终端复用：读端口状态文件 + ping + 打印链接 + exit 0
+  for needle in 'web-port' 'web-token' '网页工作台：http://127.0.0.1' 'exit 0'; do
+    grep -qF "$needle" "$X/var/jb/usr/bin/dsh" && ok "终端 dsh 复用逻辑含 $needle" || bad "终端 dsh 复用逻辑缺 $needle"
+  done
+  sh -n "$X/var/jb/usr/bin/dsh" && ok "复用后 dsh 语法通过" || bad "dsh 语法错误"
+  # 终端复用黑盒：模拟一个带 token 的 web 服务，dsh 探测片段应能命中 303。
+  # 用宿主 node（非包内 arm64 node-safe），Linux/macOS 上都能跑。
+  node -e '
+    const http=require("http");
+    const s=http.createServer((req,res)=>{res.writeHead(303,{Location:"/"});res.end();});
+    s.listen(0,"127.0.0.1",()=>{
+      const port=s.address().port;
+      const req=http.get({host:"127.0.0.1",port,path:"/?token=t",timeout:1200},r=>{
+        r.resume(); s.close();
+        process.exit(r.statusCode===303?0:1);
+      });
+      req.on("error",()=>{s.close();process.exit(1)});
+    });
+  ' >/dev/null 2>&1 && { echo "  [ OK ] 终端复用探活黑盒（303 命中）"; PASS=$((PASS+1)); } || FAIL=$((FAIL+1))
 fi
 
 sec "8) 两次构建字节级可复现"

@@ -69,8 +69,35 @@ done
 : "${NODE_OPTIONS:=--max-old-space-size=384}"
 export NODE_OPTIONS
 
-# 4) 无参数 = 启动默认 profile（web），并禁止自动开浏览器（iOS 无 xdg-open）。
+# 4) +ios24.12：无参数 = 先看是否已有 DSH 实例在跑（App 打开会自动拉起 daemon）。
+#    若已可连，直接打印它对应的网页链接并退出——绝不再起第二个实例，避免同
+#    $DSH_HOME 双实例写竞争 + 端口冲突。探不到服务才回退到原启动逻辑。
+#    带子命令（web / plugin / --dump-config 等）完全不受影响，行为照旧。
 if [ "$#" -eq 0 ]; then
+    _LOGDIR="$JB/var/log/dsh-app"
+    _PF="$_LOGDIR/web-port"
+    _TF="$_LOGDIR/web-token"
+    _RP=3080
+    [ -f "$_PF" ] && _RP=$(tr -d '\r\n\t ' < "$_PF" 2>/dev/null || true)
+    case "$_RP" in ''|*[!0-9]*) _RP=3080 ;; esac
+    _RT=dshios-fixed-token-8f3a2c
+    [ -f "$_TF" ] && _RT=$(tr -d '\r\n' < "$_TF" 2>/dev/null || true)
+    [ -n "$_RT" ] || _RT=dshios-fixed-token-8f3a2c
+    _SAFE="$D/node-safe"
+    [ -x "$_SAFE" ] || _SAFE="$NODE"
+    if "$_SAFE" -e '
+      const http=require("http");
+      const req=http.get({host:"127.0.0.1",port:Number(process.argv[1]),
+        path:"/?token="+encodeURIComponent(process.argv[2]),timeout:1200},r=>{
+        r.resume(); process.exit((r.statusCode===303||r.statusCode===200)?0:1);
+      });
+      req.on("error",()=>process.exit(1));
+      req.on("timeout",()=>{req.destroy();process.exit(1)});
+    ' "$_RP" "$_RT" >/dev/null 2>&1; then
+        printf 'DSH 已在运行，网页工作台：http://127.0.0.1:%s/?token=%s\n' "$_RP" "$_RT"
+        exit 0
+    fi
+    # 探不到服务：回退原行为——启动默认 profile（web），禁止自动开浏览器。
     set -- web --no-open --port "${DSH_WEB_PORT:-3080}"
 fi
 
