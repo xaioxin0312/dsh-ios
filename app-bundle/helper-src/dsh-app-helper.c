@@ -7,6 +7,7 @@
  * which bootstraps/kickstarts the launchd daemon when it is not running.
  * It accepts no arguments and cannot run arbitrary commands.
  */
+#include <unistd.h>
 #include <stdio.h>
 #include <roothide.h>
 

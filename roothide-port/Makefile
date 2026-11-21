@@ -63,12 +63,15 @@ mcp-logreader_CODESIGN_FLAGS = -S$(THEOS_PROJECT_DIR)/DSHRH-Logreader.entitlemen
 dsh-ios-control_FILES = $(wildcard $(CORE_DIR)/*.m)
 dsh-ios-control_INSTALL_PATH = /Library/MobileSubstrate/DynamicLibraries
 dsh-ios-control_FRAMEWORKS = UIKit Foundation IOKit CoreGraphics QuartzCore MobileCoreServices AVFoundation Security Vision
-dsh-ios-control_CFLAGS += -DMCP_ROOTHIDE=1 -iquote$(CORE_DIR)
+# Keep warnings for the upstream provider's legacy UIKit fallback paths, which
+# remain available on iOS 16. Do not turn only deprecation diagnostics into errors.
+dsh-ios-control_CFLAGS += -DMCP_ROOTHIDE=1 -iquote$(CORE_DIR) -Wno-error=deprecated-declarations
 dsh-ios-control_LDFLAGS += -lroothide
 
 dsh-ios-hud_FILES = $(HUD_DIR)/HUDOverlay.m
 dsh-ios-hud_INSTALL_PATH = /Library/MobileSubstrate/DynamicLibraries
 dsh-ios-hud_FRAMEWORKS = UIKit Foundation QuartzCore
+dsh-ios-hud_CFLAGS += -Wno-error=deprecated-declarations
 
 ADDITIONAL_OBJCFLAGS += -fobjc-arc
 

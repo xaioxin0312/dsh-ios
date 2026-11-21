@@ -3,13 +3,13 @@
  * The UIApplication executable is DSHNativeApp; this tool runs the package's
  * dsh-app-ui script when a caller invokes the historical launcher directly.
  */
-#include <roothide.h>
 
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <roothide.h>
 
 int main(int argc, char **argv) {
     (void)argc;

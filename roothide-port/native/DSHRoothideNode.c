@@ -3,13 +3,13 @@
  * Installed as /usr/lib/dsh/bin/node; the original Node Mach-O stays at
  * /usr/lib/dsh/bin/node-real and is never rewritten by this launcher.
  */
-#include <roothide.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <unistd.h>
+#include <roothide.h>
 
 extern char **environ;
 
