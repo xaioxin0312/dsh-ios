@@ -40,6 +40,10 @@ The following still need device evidence: installation and daemon startup, the A
 
 This is a jailbreak-system package, not a standalone IPA. Copying its `.app` into `Payload` would omit the external Node/launchd backend.
 
+## Device acceptance
+
+The candidate must still be installed and exercised on the target iOS 16.6.1 handset. Follow [the device acceptance checklist](DEVICE-ACCEPTANCE.zh.md) for first launch, conversations and plugin install/enable/disable. Phone-control bridge registration is explicit on a fresh configuration: run `dsh-phone-bridge-ctl config-on` from the bootstrap terminal only when that feature is wanted. The build does not run this command against existing user data.
+
 ## Upstream rules
 
 - https://github.com/roothide/Developer

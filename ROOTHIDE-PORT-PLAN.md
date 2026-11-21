@@ -1,6 +1,6 @@
 # Dopamine-roothide / iOS 16.6.1 port
 
-Status: source and released package audited; user fork created and native/runtime adaptation implemented under `roothide-port/`. Host tests are in progress. Cloud compilation and device validation remain separate acceptance steps.
+Status: cloud run 44860968535 succeeded for port commit beea6d828492a393b79169d61532cb2d474c6904. The downloaded candidate also passed local package auditing and checksum verification. All eight inspected native components (including both injection slices) have a minimum iOS version of 15.0. Device installation and runtime validation on iOS 16.6.1 remain pending.
 
 ## Verified inputs
 
