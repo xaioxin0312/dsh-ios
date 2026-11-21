@@ -27,3 +27,13 @@ __pycache__/
 gh_token
 .env.local
 .DS_Store
+
+# Local inputs and generated output for the Dopamine-roothide port
+/incoming/
+/build/roothide/
+/roothide-port/.theos/
+/roothide-port/build/
+/roothide-port/packages/
+/roothide-port/layout/
+/roothide-port/.inspect-*/
+/roothide-port/.test-*/

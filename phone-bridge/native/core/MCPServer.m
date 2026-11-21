@@ -445,12 +445,6 @@ static BOOL MCPRectValuesFromDictionary(NSDictionary *rect, double *outX, double
     return YES;
 }
 
-static BOOL MCPDirectoryExists(NSString *path) {
-    if (path.length == 0) return NO;
-    BOOL isDirectory = NO;
-    return [[NSFileManager defaultManager] fileExistsAtPath:path isDirectory:&isDirectory] && isDirectory;
-}
-
 static NSDictionary *MCPHelperExecutableStatus(NSString *logicalPath) {
     NSString *resolvedPath = MCPResolvedJailbreakPath(logicalPath);
     BOOL executable = resolvedPath.length > 0 && [[NSFileManager defaultManager] isExecutableFileAtPath:resolvedPath];
@@ -478,11 +472,9 @@ static NSDictionary *MCPJailbreakInfo(BOOL debug) {
     NSString *rootPath = @"/";
     if ([packageScheme isEqualToString:@"roothide"]) {
         NSString *candidate = MCPResolvedJailbreakPath(@"/");
-        rootPath = candidate.length > 0 ? candidate : @"/var/jb";
-    } else if ([packageScheme isEqualToString:@"rootless"] || MCPDirectoryExists(@"/var/jb")) {
-        if (![packageScheme isEqualToString:@"roothide"]) {
-            type = @"rootless";
-        }
+        rootPath = candidate.length > 0 ? candidate : @"";
+    } else if ([packageScheme isEqualToString:@"rootless"]) {
+        type = @"rootless";
         rootPath = @"/var/jb";
     }
 

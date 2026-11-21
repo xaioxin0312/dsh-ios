@@ -314,13 +314,10 @@ static MCPAXVoiceOverWorkspaceRuntime *MCPAXResolveVoiceOverWorkspaceRuntime(voi
 
     const char *libAccessibilityPaths[] = {
         "/System/Library/Frameworks/Accessibility.framework/Accessibility",
-        "/var/jb/System/Library/Frameworks/Accessibility.framework/Accessibility",
-        "/usr/lib/libAccessibility.dylib",
-        "/var/jb/usr/lib/libAccessibility.dylib"
+        "/usr/lib/libAccessibility.dylib"
     };
     const char *accessibilityUtilitiesPaths[] = {
-        "/System/Library/PrivateFrameworks/AccessibilityUtilities.framework/AccessibilityUtilities",
-        "/var/jb/System/Library/PrivateFrameworks/AccessibilityUtilities.framework/AccessibilityUtilities"
+        "/System/Library/PrivateFrameworks/AccessibilityUtilities.framework/AccessibilityUtilities"
     };
 
     bindLibAccessibilityFromHandle(RTLD_DEFAULT, @"RTLD_DEFAULT");

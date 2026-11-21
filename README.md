@@ -1,4 +1,8 @@
-# dsh for iPhone X / iOS 16.7.15 / Dopamine 3.0 (rootless)
+# dsh-ios：Dopamine-roothide / iOS 16 候选适配
+
+> 此 fork 新增面向 **iOS 16.6.1 / Dopamine-roothide** 的源码适配与手动构建流程，见 [隐根构建说明](roothide-port/README.md)。产物在通过静态检查后仍需真机验收。下文保留的版本说明、安装路径与测试记录属于原上游 **普通 rootless** 项目，不代表本 fork 已在隐根环境验证。
+
+## 原上游说明：iPhone X / iOS 16.7.15 / Dopamine 3.0 rootless
 
 **做成 rootless 越狱包（.deb），装完点桌面「DeepSeek Harness」图标即用，launchd 常驻自启，无需终端。** 不需要 WKWebView，不需要 iSH 模拟器，不需要 TrollStore，不装系统 node。
 

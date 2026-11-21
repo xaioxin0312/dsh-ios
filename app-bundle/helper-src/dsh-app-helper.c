@@ -7,14 +7,15 @@
  * which bootstraps/kickstarts the launchd daemon when it is not running.
  * It accepts no arguments and cannot run arbitrary commands.
  */
-#include <unistd.h>
 #include <stdio.h>
+#include <roothide.h>
 
 int main(void) {
     if (setgid(0) != 0 || setuid(0) != 0) {
         return 78;
     }
-    execl("/var/jb/bin/sh", "sh", "-c",
-          "/var/jb/usr/bin/dsh-app-ctl ensure >/dev/null 2>&1", (char *)0);
+    // 只把 shell 可执行文件路径解析为实际 jbroot；shell 命令仍按 bootstrap 虚根路径。
+    execl(jbroot("/bin/sh"), "sh", "-c",
+          "/usr/bin/dsh-app-ctl ensure >/dev/null 2>&1", (char *)0);
     return 78;
 }

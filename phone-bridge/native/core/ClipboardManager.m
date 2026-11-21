@@ -99,9 +99,7 @@ static NSArray<NSString *> *MCP_StringsFromPlistData(NSData *data) {
 static NSString *MCP_ExistingPasteboardCacheRoot(void) {
     NSArray<NSString *> *roots = @[
         @"/private/var/mobile/Library/Caches/com.apple.Pasteboard",
-        @"/var/mobile/Library/Caches/com.apple.Pasteboard",
-        @"/var/jb/private/var/mobile/Library/Caches/com.apple.Pasteboard",
-        @"/var/jb/var/mobile/Library/Caches/com.apple.Pasteboard"
+        @"/var/mobile/Library/Caches/com.apple.Pasteboard"
     ];
 
     NSFileManager *fm = [NSFileManager defaultManager];

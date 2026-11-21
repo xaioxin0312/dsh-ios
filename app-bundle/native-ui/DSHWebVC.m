@@ -24,11 +24,13 @@
 #import <sys/wait.h>
 #import <unistd.h>
 #import <dispatch/dispatch.h>
+#import <roothide.h>
 
 extern char **environ;
 
-static NSString *const kPortFile  = @"/var/jb/var/log/dsh-app/web-port";
-static NSString *const kTokenFile = @"/var/jb/var/log/dsh-app/web-token";
+static NSString *DSHRHWebPortFile(void) { return jbroot(@"/var/log/dsh-app/web-port"); }
+static NSString *DSHRHWebTokenFile(void) { return jbroot(@"/var/log/dsh-app/web-token"); }
+static const char *DSHRHWebHelperPath(void) { return jbroot("/usr/bin/dsh-app-helper"); }
 static NSString *const kDefaultPort  = @"3080";
 static NSString *const kDefaultToken = @"dshios-fixed-token-8f3a2c";
 static NSString *const kBridge = @"http://127.0.0.1:8091";
@@ -50,8 +52,8 @@ static NSString *const kBridge = @"http://127.0.0.1:8091";
     s = [s stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     return (s.length > 0) ? s : fb;
 }
-- (NSString *)port  { return [self readFile:kPortFile  fallback:kDefaultPort]; }
-- (NSString *)token { return [self readFile:kTokenFile fallback:kDefaultToken]; }
+- (NSString *)port  { return [self readFile:DSHRHWebPortFile()  fallback:kDefaultPort]; }
+- (NSString *)token { return [self readFile:DSHRHWebTokenFile() fallback:kDefaultToken]; }
 
 - (NSURL *)buildURL {
     NSString *u = [NSString stringWithFormat:@"http://127.0.0.1:%@/?token=%@", [self port], [self token]];
@@ -75,7 +77,7 @@ static NSString *const kBridge = @"http://127.0.0.1:8091";
 // 主动拉起 daemon 后加载 Web UI。helper 缺失/失败都降级为直接加载，绝不白屏。
 - (void)ensureDaemonThenLoad {
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        const char *helper = "/var/jb/usr/bin/dsh-app-helper";
+        const char *helper = DSHRHWebHelperPath();
         if (access(helper, X_OK) == 0) {
             pid_t pid = -1;
             char *const argv[] = { (char *)helper, NULL };

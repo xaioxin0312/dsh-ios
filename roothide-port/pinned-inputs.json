@@ -1,0 +1,15 @@
+{
+  "upstream_repository": "yitenchen123/dsh-ios",
+  "upstream_release": "v0.2.2-rc.3+ios24.12",
+  "upstream_commit": "17a0f178ade3b42e7f469b6ea412c81aaf7f58bd",
+  "asset_name": "dev.airdevs.dsh_0.2.2-rc.3+ios24.12_iphoneos-arm64.deb",
+  "asset_url": "https://github.com/yitenchen123/dsh-ios/releases/download/v0.2.2-rc.3%2Bios24.12/dev.airdevs.dsh_0.2.2-rc.3%2Bios24.12_iphoneos-arm64.deb",
+  "asset_sha256": "1fd86988ee9371bf2890f8cf7c1812521fc158eb1333b16a62f33ac18014d215",
+  "theos_repository": "https://github.com/roothide/theos.git",
+  "theos_commit": "958fea4f779943505b15b93c88bb4db8d97b346d",
+  "sdk_repository": "https://github.com/theos/sdks.git",
+  "sdk_commit": "0222fd5413cf4b9af096f37b4621afa2688572f7",
+  "sdk_directory": "iPhoneOS16.5.sdk",
+  "minimum_ios": "15.0",
+  "target_ios_for_device_validation": "16.6.1"
+}

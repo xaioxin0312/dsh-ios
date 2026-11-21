@@ -1,0 +1,98 @@
+name: Dopamine-roothide candidate
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: roothide-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    runs-on: xcode-27
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+
+      - name: Select Xcode and install host tools
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s /Applications/Xcode_27.2.app/Contents/Developer
+          xcodebuild -version
+          brew install ldid dpkg make coreutils
+          echo "$(brew --prefix coreutils)/libexec/gnubin" >> "$GITHUB_PATH"
+          echo "MAKE=gmake" >> "$GITHUB_ENV"
+
+      - name: Cache pinned Theos and iOS 16.5 SDK
+        id: toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.temp }}/dsh-roothide-theos
+            ${{ runner.temp }}/dsh-roothide-sdks
+          key: dsh-roothide-toolchain-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('roothide-port/pinned-inputs.json') }}
+
+      - name: Prepare pinned roothide toolchain
+        run: |
+          set -euo pipefail
+          THEOS_ROOT="$RUNNER_TEMP/dsh-roothide-theos"
+          SDK_ROOT="$RUNNER_TEMP/dsh-roothide-sdks"
+          THEOS_SHA="$(python3 -c 'import json; print(json.load(open("roothide-port/pinned-inputs.json"))["theos_commit"])')"
+          SDK_SHA="$(python3 -c 'import json; print(json.load(open("roothide-port/pinned-inputs.json"))["sdk_commit"])')"
+          if [ ! -d "$THEOS_ROOT/.git" ]; then
+            git clone --no-checkout https://github.com/roothide/theos.git "$THEOS_ROOT"
+          fi
+          git -C "$THEOS_ROOT" checkout --detach "$THEOS_SHA"
+          git -C "$THEOS_ROOT" submodule update --init --recursive
+          if [ ! -d "$SDK_ROOT/.git" ]; then
+            git clone --filter=blob:none --no-checkout --depth 1 https://github.com/theos/sdks.git "$SDK_ROOT"
+          fi
+          git -C "$SDK_ROOT" sparse-checkout set iPhoneOS16.5.sdk
+          git -C "$SDK_ROOT" fetch --depth 1 origin "$SDK_SHA"
+          git -C "$SDK_ROOT" checkout --detach "$SDK_SHA"
+          test -d "$SDK_ROOT/iPhoneOS16.5.sdk"
+          mkdir -p "$THEOS_ROOT/sdks"
+          if [ ! -e "$THEOS_ROOT/sdks/iPhoneOS16.5.sdk" ]; then
+            ln -s "$SDK_ROOT/iPhoneOS16.5.sdk" "$THEOS_ROOT/sdks/iPhoneOS16.5.sdk"
+          fi
+          echo "THEOS=$THEOS_ROOT" >> "$GITHUB_ENV"
+          echo "THEOS_PACKAGE_SCHEME=roothide" >> "$GITHUB_ENV"
+          echo "THEOS_SHA=$(git -C "$THEOS_ROOT" rev-parse HEAD)"
+          echo "SDK_SHA=$(git -C "$SDK_ROOT" rev-parse HEAD)"
+
+      - name: Validate port scripts
+        run: bash roothide-port/run-tests.sh
+
+      - name: Build and verify candidate package
+        env:
+          DSH_PORT_BUILD_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          mkdir -p build/roothide
+          bash roothide-port/build.sh 2>&1 | tee build/roothide/build.log
+
+      - name: Upload candidate deb and verification report
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-dopamine-roothide-ios16-candidate-${{ github.run_number }}
+          path: |
+            build/roothide/output/*.deb
+            build/roothide/output/*.sha256
+            build/roothide/output/*.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-roothide-build-log-${{ github.run_number }}
+          path: build/roothide/build.log
+          if-no-files-found: ignore
+          retention-days: 7

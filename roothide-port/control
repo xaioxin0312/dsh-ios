@@ -1,0 +1,9 @@
+Package: dev.airdevs.dsh
+Name: DeepSeek Harness (Roothide)
+Version: 0.2.2-rc.3+ios24.12+roothide1
+Section: Utilities
+Priority: optional
+Architecture: iphoneos-arm64e
+Maintainer: Air-Devs <air2@localhost>
+Description: DeepSeek Harness iOS package built for Roothide
+ Candidate build for iOS 16.6.1; native arm64/arm64e slices are selected per target.
