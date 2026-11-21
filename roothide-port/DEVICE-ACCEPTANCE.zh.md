@@ -32,8 +32,8 @@ dsh-phone-bridge-ctl config-on
 
 ```sh
 dpkg-query -W -f='${Package} ${Version} ${Architecture}\n' dev.airdevs.dsh
-launchctl print system/dev.airdevs.dsh
-launchctl print system/dev.airdevs.dsh.phone-bridge
+launchctl print user/foreground/dev.airdevs.dsh
+launchctl print user/foreground/dev.airdevs.dsh.phone-bridge
 ```
 
 反馈时优先说明：手机型号、系统版本、安装是否完成、App 能否打开、哪个步骤失败，以及服务状态里的 `state` / `pid` / `last exit code`。模型服务商的 Key 留在手机上自行配置。

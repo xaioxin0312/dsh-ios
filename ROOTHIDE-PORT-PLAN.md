@@ -1,6 +1,6 @@
 # Dopamine-roothide / iOS 16.6.1 port
 
-Status: cloud run 44860968535 succeeded for port commit beea6d828492a393b79169d61532cb2d474c6904. The downloaded candidate also passed local package auditing and checksum verification. All eight inspected native components (including both injection slices) have a minimum iOS version of 15.0. Device installation and runtime validation on iOS 16.6.1 remain pending.
+Status: candidate 8 was installed on iOS 16.6.1 and a Safari fallback initialization crash was reported. Candidate 9, from port commit f2d0a03 and cloud run 44875240621, fixes the early-WebContent/startup race, validates local endpoint URLs and uses the explicit user/foreground launchd domain. Apple-host URL/startup regressions, native compilation, cloud package auditing and local checksum/package verification passed. The App now reports version 0.2.2 / build 1.9. Candidate 9 still needs handset verification; the original cause of WebContent XPC termination is not established by the crash log alone.
 
 ## Verified inputs
 
