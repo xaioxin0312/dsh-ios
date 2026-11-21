@@ -65,12 +65,13 @@ chmod 755 /var/log/dsh-app /rootfs/var/mobile/Library/DSH
 [ -u /usr/bin/dsh-app-helper ]
 [ -x /usr/lib/dsh/bin/node ]
 [ -x /usr/lib/dsh/bin/node-real ]
+# Candidate 8's system aliases may already have resolved here. Remove only
+# this package's old agent and jobs, then load the freshly installed plists.
+launchctl bootout user/foreground/dev.airdevs.dsh.agent >/dev/null 2>&1 || :
 for label in dev.airdevs.dsh.phone-bridge dev.airdevs.dsh; do
-    launchctl bootout "system/$label" >/dev/null 2>&1 || :
-    if ! launchctl bootstrap system "/Library/LaunchDaemons/$label.plist"; then
-        launchctl load "/Library/LaunchDaemons/$label.plist"
-    fi
-    launchctl kickstart -k "system/$label"
+    launchctl bootout "user/foreground/$label" >/dev/null 2>&1 || :
+    launchctl bootstrap user/foreground "/Library/LaunchDaemons/$label.plist"
+    launchctl kickstart -k "user/foreground/$label"
 done
 uicache -p /Applications/DSH.app
 '''
@@ -81,11 +82,8 @@ case "${1:-remove}" in
     remove|deconfigure) ;;
     *) exit 0 ;;
 esac
-for domain in gui/501 user/501; do
-    launchctl bootout "$domain/dev.airdevs.dsh.agent" >/dev/null 2>&1 || :
-done
-for label in dev.airdevs.dsh dev.airdevs.dsh.phone-bridge; do
-    launchctl bootout "system/$label" >/dev/null 2>&1 || :
+for label in dev.airdevs.dsh.agent dev.airdevs.dsh dev.airdevs.dsh.phone-bridge; do
+    launchctl bootout "user/foreground/$label" >/dev/null 2>&1 || :
 done
 uicache -u /Applications/DSH.app || :
 '''
@@ -143,7 +141,80 @@ def validate_tree(source):
     require(seen == SOURCE_LINKS.keys(), 'missing release node_modules/.bin links')
 
 
+def replace_function_block(text, start, end, replacement):
+    require(text.count(start) == 1 and text.count(end) == 1,
+            f'unexpected launchctl function boundary: {start!r}, {end!r}')
+    first, last = text.index(start), text.index(end)
+    require(first < last, 'reversed launchctl function boundaries')
+    return text[:first] + replacement + '\n\n' + text[last:]
+
+
+CONTROL_LAUNCH_FUNCTIONS = '''do_bootstrap() {
+    [ -f "$PLIST" ] || { echo "missing $PLIST" >&2; return 1; }
+    [ -n "$LC" ] || { echo "launchctl unavailable" >&2; return 1; }
+    # An already-loaded service needs no second bootstrap or legacy load.
+    if ! "$LC" print "user/foreground/$LABEL" >/dev/null 2>&1; then
+        "$LC" bootstrap user/foreground "$PLIST" || return 1
+    fi
+    "$LC" kickstart "user/foreground/$LABEL" || return 1
+    "$LC" print "user/foreground/$LABEL" >/dev/null
+}
+
+do_bootout() {
+    [ -n "$LC" ] || return 0
+    # Only this exact service is touched; an absent service is already stopped.
+    if "$LC" print "user/foreground/$LABEL" >/dev/null 2>&1; then
+        "$LC" bootout "user/foreground/$LABEL" || return 1
+    fi
+}'''
+
+AUTOSTART_REPAIR = '''cmd_repair() {
+    [ -n "$LC" ] || { bad "launchctl unavailable"; return 1; }
+    mkdir -p "$LOGDIR" 2>/dev/null || true
+    chown 0:0 "$PL" 2>/dev/null || true
+    chmod 644 "$PL" 2>/dev/null || true
+    "$LC" bootout user/foreground/dev.airdevs.dsh.agent >/dev/null 2>&1 || true
+    "$LC" bootout user/foreground/dev.airdevs.dsh >/dev/null 2>&1 || true
+    "$LC" bootstrap user/foreground "$PL" || return 1
+    "$LC" kickstart -k user/foreground/dev.airdevs.dsh || return 1
+    if [ -f "$AG" ]; then
+        chown 0:0 "$AG" 2>/dev/null || true
+        chmod 644 "$AG" 2>/dev/null || true
+        "$LC" bootstrap user/foreground "$AG" || return 1
+    fi
+    i=0
+    while [ "$i" -lt 40 ]; do
+        if probe; then ok "DSH Web ready ($PORT)"; return 0; fi
+        i=$((i + 1))
+        sleep 0.5 2>/dev/null || sleep 1
+    done
+    bad "DSH Web not ready; see dsh-autostart logs"
+    return 1
+}'''
+
+
+def launch_shell_transform(name, text):
+    # These boundaries are inside SHA-256-pinned upstream shell files only.
+    if name in ('usr/bin/dsh-app-ctl', 'usr/bin/dsh-phone-bridge-ctl'):
+        end = 'do_register() {' if name.endswith('/dsh-app-ctl') else 'config() {'
+        text = replace_function_block(text, 'do_bootstrap() {', end, CONTROL_LAUNCH_FUNCTIONS)
+        if name.endswith('/dsh-app-ctl'):
+            text = anchored(text, 'print "system/$LABEL"', 'print "user/foreground/$LABEL"')
+            text = anchored(text, '"$LC" list "$LABEL"', '"$LC" print "user/foreground/$LABEL"')
+        else:
+            old = '''P=$("$LC" list "$LABEL" 2>/dev/null | sed -n 's/^\\([0-9][0-9]*\\)[[:space:]].*/\\1/p' | head -1)'''
+            new = '''P=$("$LC" print "user/foreground/$LABEL" 2>/dev/null | sed -n 's/^[[:space:]]*pid = \\([0-9][0-9]*\\).*/\\1/p' | head -1)'''
+            text = anchored(text, old, new)
+    elif name == 'usr/bin/dsh-autostart':
+        text = anchored(text, 'job_state system dev.airdevs.dsh', 'job_state user/foreground dev.airdevs.dsh')
+        text = anchored(text, 'job_state gui/$UID_MOBILE dev.airdevs.dsh.agent',
+                        'job_state user/foreground dev.airdevs.dsh.agent')
+        text = replace_function_block(text, 'cmd_repair() {', 'cmd_logs() {', AUTOSTART_REPAIR)
+    return text
+
+
 def shell_transform(name, text):
+    text = launch_shell_transform(name, text)
     if name == 'usr/bin/dsh':
         text = anchored(text, 'if [ ! -L "$JB" ] || [ ! -x "$NODE" ] || [ ! -f "$BIN" ]; then',
                         'if [ ! -x "$NODE" ] || [ ! -f "$BIN" ]; then')
@@ -177,6 +248,17 @@ def launch_transform(file, command):
     config = plistlib.loads(file.read_bytes())
     require(config.get('ProgramArguments') == ['/var/jb/usr/bin/' + command], str(file))
     config['ProgramArguments'] = ['/usr/bin/' + command]
+    # user/foreground owns the job identity; root-daemon identity overrides and
+    # the macOS Aqua-only session filter do not belong to this user domain.
+    if command == 'dsh-autostart-agent':
+        require(config.pop('LimitLoadToSessionType', None) == 'Aqua',
+                f'{file}: unexpected agent session filter')
+        require('UserName' not in config and 'GroupName' not in config,
+                f'{file}: unexpected agent identity override')
+    else:
+        require(config.pop('UserName', None) == 'mobile', f'{file}: UserName')
+        require(config.pop('GroupName', None) == 'mobile', f'{file}: GroupName')
+        require('LimitLoadToSessionType' not in config, f'{file}: unexpected session filter')
     for key in ('StandardErrorPath', 'StandardOutPath'):
         old = config[key]
         require(old.startswith('/var/jb/var/log/dsh-app/'), f'{file}: {key}')
@@ -231,6 +313,10 @@ def prepare(source, destination):
         config = plistlib.loads(info.read_bytes())
         require(config.get('CFBundleExecutable') in ('DSHLauncher', 'DSHNativeApp'), 'unexpected app executable')
         config['CFBundleExecutable'] = 'DSHNativeApp'
+        config['CFBundleShortVersionString'] = '0.2.2'
+        build = os.environ.get('DSH_PORT_BUILD_NUMBER', '')
+        config['CFBundleVersion'] = '1.' + (build if re.fullmatch(r'[0-9]+', build) else '0')
+        config['DSHRHPackageVariant'] = 'dopamine-roothide'
         info.write_bytes(plistlib.dumps(config, sort_keys=False))
         preload = stage / 'usr/lib/dsh/roothide-node-preload.cjs'
         with preload.open('xb') as f:

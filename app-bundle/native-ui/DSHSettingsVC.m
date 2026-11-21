@@ -4,6 +4,7 @@
  * rootless 手签 App 的 WKWebView 无法启动 WebContent XPC，SafariServices 可靠。
  */
 #import "DSHSettingsVC.h"
+#import "DSHRHWebEndpoint.h"
 #import <SafariServices/SafariServices.h>
 #import <roothide.h>
 
@@ -72,13 +73,24 @@ static NSString *const kBridge = @"http://127.0.0.1:8091";
         NSString *token = [NSString stringWithContentsOfFile:DSHRHSettingsTokenFile() encoding:NSUTF8StringEncoding error:nil];
         token = [token stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
         if (!token.length) token = kDefaultToken;
-        NSString *webURL = [NSString stringWithFormat:@"http://127.0.0.1:%@/?token=%@", port, token];
-        SFSafariViewController *sf = [[SFSafariViewController alloc]
-            initWithURL:[NSURL URLWithString:webURL]];
-        sf.delegate = self;
-        sf.preferredBarTintColor = [UIColor colorWithRed:0.09 green:0.10 blue:0.12 alpha:1.0];
-        sf.preferredControlTintColor = [UIColor colorWithRed:0.20 green:0.78 blue:0.62 alpha:1.0];
-        [self presentViewController:sf animated:YES completion:nil];
+        NSURL *url = DSHRHBuildWebEndpoint(port, token);
+        @try {
+            SFSafariViewController *sf = [[SFSafariViewController alloc] initWithURL:url];
+            sf.delegate = self;
+            sf.preferredBarTintColor = [UIColor colorWithRed:0.09 green:0.10 blue:0.12 alpha:1.0];
+            sf.preferredControlTintColor = [UIColor colorWithRed:0.20 green:0.78 blue:0.62 alpha:1.0];
+            [self presentViewController:sf animated:YES completion:nil];
+        } @catch (NSException *exception) {
+            NSLog(@"[DSH] Settings browser unavailable: %@", exception.name);
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"工作台未能打开"
+                message:@"可在浏览器中打开本机工作台。" preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"在浏览器打开" style:UIAlertActionStyleDefault
+                handler:^(UIAlertAction *action) {
+                    [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
+                }]];
+            [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+            [self presentViewController:alert animated:YES completion:nil];
+        }
     } else if ([a isEqualToString:@"status"]) {
         [self showStatus];
     }

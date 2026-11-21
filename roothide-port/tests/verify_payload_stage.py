@@ -4,6 +4,7 @@ import hashlib
 import os
 from pathlib import Path
 import plistlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -11,6 +12,7 @@ import tempfile
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import prepare_payload as stage
+from test_launch_domains import verify_launch_domains
 
 RELEASE_SHA = '1fd86988ee9371bf2890f8cf7c1812521fc158eb1333b16a62f33ac18014d215'
 
@@ -35,7 +37,12 @@ def main(archive):
         assert not (out / 'usr/lib/dsh/bin/node').exists()
         assert not (out / 'var/jb').exists()
         assert not any((out / n).exists() for n in stage.NATIVE)
-        assert plistlib.loads((out / 'Applications/DSH.app/Info.plist').read_bytes())['CFBundleExecutable'] == 'DSHNativeApp'
+        app_info = plistlib.loads((out / 'Applications/DSH.app/Info.plist').read_bytes())
+        assert app_info['CFBundleExecutable'] == 'DSHNativeApp'
+        assert app_info['CFBundleShortVersionString'] == '0.2.2'
+        build = os.environ.get('DSH_PORT_BUILD_NUMBER', '')
+        assert app_info['CFBundleVersion'] == '1.' + (build if re.fullmatch(r'[0-9]+', build) else '0')
+        assert app_info['DSHRHPackageVariant'] == 'dopamine-roothide'
         scripts = (*stage.SHELL_FILES, 'DEBIAN/postinst', 'DEBIAN/prerm')
         for name in scripts:
             subprocess.run(['sh', '-n', str(out / name)], check=True)
@@ -43,6 +50,7 @@ def main(archive):
             obj = plistlib.loads((out / p).read_bytes())
             assert obj['ProgramArguments'] == ['/usr/bin/' + cmd]
             assert obj['WorkingDirectory'] == '/rootfs/var/mobile'
+        verify_launch_domains(out)
         for name, target in stage.SOURCE_LINKS.items():
             assert os.readlink(out / 'usr/lib/dsh/node_modules/.bin' / name) == target
         for n, expected in stage.HASHES.items():

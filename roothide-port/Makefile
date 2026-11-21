@@ -28,7 +28,7 @@ LOGREADER_DIR = $(THEOS_PROJECT_DIR)/../phone-bridge/native/tools/mcp-logreader
 
 # Standalone executable targets. The prepared payload supplies Info.plist/assets;
 # Theos stages only these replacement Mach-O files at their final logical paths.
-DSHNativeApp_FILES = $(NATIVE_UI_DIR)/DSHAppDelegate.m $(NATIVE_UI_DIR)/DSHRootVC.m $(NATIVE_UI_DIR)/DSHSettingsVC.m $(NATIVE_UI_DIR)/DSHWebVC.m $(NATIVE_UI_DIR)/main.m
+DSHNativeApp_FILES = $(NATIVE_UI_DIR)/DSHAppDelegate.m $(NATIVE_UI_DIR)/DSHRootVC.m $(NATIVE_UI_DIR)/DSHSettingsVC.m $(NATIVE_UI_DIR)/DSHWebVC.m $(NATIVE_UI_DIR)/DSHRHWebEndpoint.m $(NATIVE_UI_DIR)/main.m
 DSHNativeApp_INSTALL_PATH = /Applications/DSH.app
 DSHNativeApp_ARCHS = arm64
 DSHNativeApp_FRAMEWORKS = UIKit Foundation WebKit SafariServices QuartzCore

@@ -18,6 +18,8 @@
  */
 #import "DSHWebVC.h"
 #import "DSHSettingsVC.h"
+#import "DSHRHWebEndpoint.h"
+#import "DSHRHStartupState.h"
 #import <WebKit/WebKit.h>
 #import <SafariServices/SafariServices.h>
 #import <spawn.h>
@@ -45,7 +47,9 @@ static NSString *const kBridge = @"http://127.0.0.1:8091";
 @property (nonatomic, strong) NSURL *targetURL;
 @end
 
-@implementation DSHWebVC
+@implementation DSHWebVC {
+    DSHRHStartupState _startupState;
+}
 
 - (NSString *)readFile:(NSString *)path fallback:(NSString *)fb {
     NSString *s = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
@@ -56,14 +60,17 @@ static NSString *const kBridge = @"http://127.0.0.1:8091";
 - (NSString *)token { return [self readFile:DSHRHWebTokenFile() fallback:kDefaultToken]; }
 
 - (NSURL *)buildURL {
-    NSString *u = [NSString stringWithFormat:@"http://127.0.0.1:%@/?token=%@", [self port], [self token]];
-    return [NSURL URLWithString:u];
+    return DSHRHBuildWebEndpoint([self port], [self token]);
 }
 
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.view.backgroundColor = [UIColor colorWithRed:0.09 green:0.10 blue:0.12 alpha:1.0];
     self.title = @"DeepSeek Harness";
+    // WKWebView can report process failure before the helper returns.
+    // Establish a valid URL and the startup gate before creating WebKit.
+    self.targetURL = [self buildURL];
+    DSHRHStartupBegin(&_startupState);
     [self buildWebView];
     [self buildCapsule];
     [self buildSettingsButton];
@@ -74,8 +81,17 @@ static NSString *const kBridge = @"http://127.0.0.1:8091";
     [self ensureDaemonThenLoad];
 }
 
-// 主动拉起 daemon 后加载 Web UI。helper 缺失/失败都降级为直接加载，绝不白屏。
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    if (_startupState.fallbackPending) [self degradeToSafari];
+}
+
+// The helper starts off-screen; an early WebKit failure is held until it returns.
 - (void)ensureDaemonThenLoad {
+    // Preserve a failure reported synchronously while WebKit was being created.
+    if (!_startupState.startingBackend) DSHRHStartupBegin(&_startupState);
+    self.didFinish = NO;
+    self.degraded = NO;
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         const char *helper = DSHRHWebHelperPath();
         if (access(helper, X_OK) == 0) {
@@ -89,7 +105,9 @@ static NSString *const kBridge = @"http://127.0.0.1:8091";
         }
         dispatch_async(dispatch_get_main_queue(), ^{
             self.targetURL = [self buildURL];
-            [self loadTarget];
+            DSHRHStartupComplete(&self->_startupState);
+            if (self->_startupState.fallbackPending) [self degradeToSafari];
+            else [self loadTarget];
         });
     });
 }
@@ -122,6 +140,9 @@ static NSString *const kBridge = @"http://127.0.0.1:8091";
 }
 
 - (void)loadTarget {
+    if (self.degraded) return;
+    if (!DSHRHIsLocalWebEndpoint(self.targetURL)) self.targetURL = [self buildURL];
+    [self.watchdog invalidate];
     NSURLRequest *req = [NSURLRequest requestWithURL:self.targetURL
         cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:8.0];
     [self.web loadRequest:req];
@@ -133,38 +154,83 @@ static NSString *const kBridge = @"http://127.0.0.1:8091";
     }];
 }
 
-#pragma mark - 降级通道（保证「不断」）
+#pragma mark - Browser fallback and recoverable startup failure
 - (void)degradeToSafari {
     if (self.degraded) return;
-    self.degraded = YES;
+    DSHRHStartupRequestFallback(&_startupState);
     [self.watchdog invalidate];
     self.watchdog = nil;
-    SFSafariViewController *sf = [[SFSafariViewController alloc] initWithURL:self.targetURL];
-    sf.delegate = self;
-    if (@available(iOS 10.0, *)) {
+    if (!DSHRHStartupCanPresentFallback(&_startupState, self.view.window != nil,
+        self.presentedViewController != nil, self.degraded)) return;
+
+    NSURL *url = DSHRHIsLocalWebEndpoint(self.targetURL) ? self.targetURL : [self buildURL];
+    self.targetURL = url;
+    if (!DSHRHIsLocalWebEndpoint(url)) {
+        _startupState.fallbackPending = NO;
+        [self dshrh_showWorkbenchRecovery];
+        return;
+    }
+    @try {
+        SFSafariViewController *sf = [[SFSafariViewController alloc] initWithURL:url];
+        sf.delegate = self;
         sf.preferredBarTintColor = [UIColor colorWithRed:0.09 green:0.10 blue:0.12 alpha:1.0];
         sf.preferredControlTintColor = [UIColor colorWithRed:0.20 green:0.78 blue:0.62 alpha:1.0];
+        self.degraded = YES;
+        _startupState.fallbackPending = NO;
+        [self presentViewController:sf animated:NO completion:nil];
+    } @catch (NSException *exception) {
+        self.degraded = NO;
+        _startupState.fallbackPending = NO;
+        NSLog(@"[DSH] Safari fallback unavailable: %@", exception.name);
+        [self dshrh_showWorkbenchRecovery];
     }
-    [self presentViewController:sf animated:NO completion:nil];
 }
-- (void)safariViewControllerDidFinish:(SFSafariViewController *)c {
-    [c dismissViewControllerAnimated:YES completion:nil];
+
+- (void)dshrh_showWorkbenchRecovery {
+    if (!self.view.window || self.presentedViewController) return;
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"工作台未能打开"
+        message:@"可以重新连接，或在浏览器中打开本机工作台。"
+        preferredStyle:UIAlertControllerStyleAlert];
+    __weak typeof(self) weakSelf = self;
+    [alert addAction:[UIAlertAction actionWithTitle:@"重新连接" style:UIAlertActionStyleDefault
+        handler:^(UIAlertAction *action) { [weakSelf ensureDaemonThenLoad]; }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"在浏览器打开" style:UIAlertActionStyleDefault
+        handler:^(UIAlertAction *action) {
+            NSURL *url = [weakSelf buildURL];
+            if (DSHRHIsLocalWebEndpoint(url)) {
+                [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
+            }
+        }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)safariViewControllerDidFinish:(SFSafariViewController *)controller {
+    __weak typeof(self) weakSelf = self;
+    [controller dismissViewControllerAnimated:YES completion:^{
+        weakSelf.degraded = NO;
+        [weakSelf dshrh_showWorkbenchRecovery];
+    }];
 }
 
 #pragma mark - WKNavigationDelegate
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
     self.didFinish = YES;
+    _startupState.fallbackPending = NO;
     [self.watchdog invalidate];
     self.watchdog = nil;
 }
 - (void)webView:(WKWebView *)webView didFailNavigation:(WKNavigation *)navigation withError:(NSError *)error {
-    if (!self.didFinish) [self degradeToSafari];
+    if (!self.didFinish && error.code != NSURLErrorCancelled) [self degradeToSafari];
 }
 - (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)navigation withError:(NSError *)error {
-    if (!self.didFinish) [self degradeToSafari];
+    if (!self.didFinish && error.code != NSURLErrorCancelled) [self degradeToSafari];
 }
 - (void)webViewWebContentProcessDidTerminate:(WKWebView *)webView {
-    if (!self.didFinish) [self degradeToSafari];
+    self.didFinish = NO;
+    NSLog(@"[DSH] WebContent terminated (backend starting=%d, URL ready=%d)",
+        _startupState.startingBackend, DSHRHIsLocalWebEndpoint(self.targetURL));
+    [self degradeToSafari];
 }
 
 // 外部链接交系统浏览器，绝不跳出 loopback。

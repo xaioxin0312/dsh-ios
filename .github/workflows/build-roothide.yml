@@ -93,6 +93,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: dsh-roothide-build-log-${{ github.run_number }}
-          path: build/roothide/build.log
+          path: |
+            build/roothide/build.log
+            roothide-port/.theos/obj/**/DSHNativeApp.dSYM/**
+          include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7

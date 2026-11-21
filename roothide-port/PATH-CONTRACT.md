@@ -25,6 +25,35 @@ roothide-aware launcher inside the App bundle. Preserve the helper's root/setuid
 and merge Node's Roothide entitlements into its original entitlements while
 signing on the build host; neither maintainer script re-signs binaries.
 
+## Launchd domain and build identity
+
+All package job management uses `user/foreground`: `bootstrap` receives that
+domain, and `print`, `bootout` and `kickstart` receive
+`user/foreground/<package-label>`. Legacy `load`, `unload`, `remove` and bare-label
+`list` are not used as domain-ambiguous fallbacks. This is the explicit iOS 16
+foreground-user target implemented by Roothide's `launchctl`.
+
+On configure, `postinst` boots out only `dev.airdevs.dsh.agent`,
+`dev.airdevs.dsh.phone-bridge` and `dev.airdevs.dsh`, then bootstraps and restarts
+the two main services using the newly installed plists. Candidate 8's `system`
+alias may already have loaded these jobs in the foreground domain; this replaces
+those same registrations without killing processes selected by name or touching
+other services. Removal/deconfiguration stops only these three package labels.
+`prerm upgrade` preserves them until the new `postinst` replaces them.
+
+The staged service plists omit the original `UserName=mobile` and
+`GroupName=mobile`, since the user domain supplies the execution identity; those
+keys describe root launchd identity overrides. The optional agent also omits its
+original `LimitLoadToSessionType=Aqua`, a session-type filter rather than a user
+domain selector. Other service properties, logical paths and user data stay as
+before. Actual foreground-user identity and execution remain device acceptance
+checks. A domain compatibility warning alone is not evidence that a job failed
+to run, and this change makes no claim about the separate App/WebKit crash.
+
+The copied App plist is stamped `CFBundleShortVersionString=0.2.2`,
+`CFBundleVersion=1.<DSH_PORT_BUILD_NUMBER>` (digits only, otherwise `1.0`), and
+`DSHRHPackageVariant=dopamine-roothide`. Original release hashes remain unchanged.
+
 ## Runtime
 
 | Context | Paths |
@@ -59,6 +88,9 @@ SpringBoard, JIT or HUD behavior.
 - [Official `jbroot` and `rootfs` APIs](https://github.com/roothide/Developer/blob/main/interface.md)
 - [libvroot](https://github.com/roothide/Developer/blob/main/vroot.md)
 - [Mirrored paths](https://github.com/roothide/Developer/blob/main/filemirror.md)
+- [Roothide foreground-user target and legacy service remapping](https://github.com/roothide/launchctl/blob/main/xpc_helper.c)
+- [Roothide bootstrap/bootout domain compatibility](https://github.com/roothide/launchctl/blob/main/bootstrap.c)
+- [Apple launchd plist identity and session keys](https://github.com/apple-oss-distributions/launchd/blob/main/man/launchd.plist.5)
 
 ```sh
 node --test roothide-port/tests/roothide-node-preload.test.cjs
@@ -66,5 +98,7 @@ python3 roothide-port/tests/verify_payload_stage.py PATH_TO_RELEASE_DEB
 ```
 
 Run the Node suite with Node 24 on POSIX. The stage verifier extracts the real
-archive into private temporary storage and only checks shell syntax, never
-executes maintainer scripts or installs packages.
+archive into private temporary storage and checks shell syntax. It never
+runs maintainer filesystem/service operations or installs packages. It executes the
+launch-control portions against a recording mock to check actual argv, loaded and
+absent jobs, upgrade replacement, bootstrap error propagation and PID parsing.
