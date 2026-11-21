@@ -446,7 +446,6 @@ static CGFloat   const kDSHDefaultLevel = 1000000.0;  // 盖过灵动岛插件
 }
 
 - (void)updateMeta {
-    NSTimeInterval now = [NSDate date].timeIntervalSince1970;
     if (self.idleMode || !self.lastState) {
         for (DSHHUDView *h in self.huds) h.metaLabel.text = @"待命";
         return;
