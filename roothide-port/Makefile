@@ -63,9 +63,9 @@ mcp-logreader_CODESIGN_FLAGS = -S$(THEOS_PROJECT_DIR)/DSHRH-Logreader.entitlemen
 dsh-ios-control_FILES = $(wildcard $(CORE_DIR)/*.m)
 dsh-ios-control_INSTALL_PATH = /Library/MobileSubstrate/DynamicLibraries
 dsh-ios-control_FRAMEWORKS = UIKit Foundation IOKit CoreGraphics QuartzCore MobileCoreServices AVFoundation Security Vision
-# Keep warnings for the upstream provider's legacy UIKit fallback paths, which
-# remain available on iOS 16. Do not turn only deprecation diagnostics into errors.
-dsh-ios-control_CFLAGS += -DMCP_ROOTHIDE=1 -iquote$(CORE_DIR) -Wno-error=deprecated-declarations
+# Retain warnings for upstream legacy UIKit fallbacks and optional diagnostic
+# helper functions. Other warnings/errors keep Theos's strict defaults.
+dsh-ios-control_CFLAGS += -DMCP_ROOTHIDE=1 -iquote$(CORE_DIR) -Wno-error=deprecated-declarations -Wno-error=unused-function
 dsh-ios-control_LDFLAGS += -lroothide
 
 dsh-ios-hud_FILES = $(HUD_DIR)/HUDOverlay.m
