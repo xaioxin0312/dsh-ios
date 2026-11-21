@@ -147,6 +147,9 @@ def inspect(package, original=None):
         errors.append("Unexpected Debian package identity")
     if any(n == "var/jb" or n.startswith("var/jb/") for n in payload):
         errors.append("Rootless /var/jb wrapper remains in payload")
+    nonroot = [name for name, (member, _) in payload.items() if member.uid != 0 or member.gid != 0]
+    if nonroot:
+        errors.append("Payload ownership is not root:wheel: " + ", ".join(nonroot[:5]))
     for name, (member, _) in payload.items():
         if (member.issym() or member.islnk()) and "/var/jb" in member.linkname:
             errors.append("Rootless symlink remains: " + name)

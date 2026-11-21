@@ -5,6 +5,9 @@ PACKAGE_VERSION ?= 0.2.2-rc.3+ios24.12+roothide1
 THEOS_PACKAGE_SCHEME ?= roothide
 THEOS_PLATFORM_DEB_COMPRESSION_TYPE ?= gzip
 THEOS_LAYOUT_DIR ?= $(THEOS_PROJECT_DIR)/layout
+# GNU dpkg writes all archive entries as root:wheel while preserving setuid bits.
+# This avoids depending on host fakeroot metadata for privileged helpers.
+_THEOS_PLATFORM_DPKG_DEB := $(CURDIR)/dpkg-root-owner
 
 ifeq ($(THEOS_PACKAGE_SCHEME),roothide)
 else

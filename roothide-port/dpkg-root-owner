@@ -1,0 +1,5 @@
+#!/bin/sh
+# Normalize Debian archive ownership without changing the runner's staged files.
+# In particular, setuid helpers must be owned by root in the installed archive.
+set -eu
+exec dpkg-deb --root-owner-group "$@"
