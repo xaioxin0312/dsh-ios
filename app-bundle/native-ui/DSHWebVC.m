@@ -98,9 +98,7 @@ static NSString *const kBridge = @"http://127.0.0.1:8091";
 - (void)buildWebView {
     WKWebViewConfiguration *cfg = [[WKWebViewConfiguration alloc] init];
     cfg.allowsInlineMediaPlayback = YES;
-    WKPreferences *pref = [[WKPreferences alloc] init];
-    pref.javaScriptEnabled = YES;
-    cfg.preferences = pref;
+    cfg.defaultWebpagePreferences.allowsContentJavaScript = YES;
     if (@available(iOS 10.0, *)) {
         cfg.mediaTypesRequiringUserActionForPlayback = WKAudiovisualMediaTypeNone;
     }
