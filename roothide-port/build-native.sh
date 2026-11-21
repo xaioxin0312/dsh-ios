@@ -3,7 +3,7 @@
 # Usage: build-native.sh PAYLOAD_ROOT STAGE_DIR [stage|package]
 set -eu
 
-HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 PAYLOAD=${1:-${THEOS_LAYOUT_DIR:-}}
 STAGE=${2:-${THEOS_STAGING_DIR:-"$HERE/.theos/roothide-stage"}}
 MODE=${3:-stage}
@@ -15,11 +15,11 @@ case "$MODE" in
     *) echo "mode must be stage or package: $MODE" >&2; exit 64 ;;
 esac
 
-PAYLOAD=$(CDPATH= cd -- "$PAYLOAD" && pwd)
+PAYLOAD=$(CDPATH= cd -- "$PAYLOAD" && pwd -P)
 STAGE_PARENT=$(dirname -- "$STAGE")
 STAGE_NAME=$(basename -- "$STAGE")
 mkdir -p "$STAGE_PARENT"
-STAGE_PARENT=$(CDPATH= cd -- "$STAGE_PARENT" && pwd)
+STAGE_PARENT=$(CDPATH= cd -- "$STAGE_PARENT" && pwd -P)
 STAGE="$STAGE_PARENT/$STAGE_NAME"
 [ "$PAYLOAD" != "$STAGE" ] || { echo "payload root and stage directory must be different" >&2; exit 65; }
 
